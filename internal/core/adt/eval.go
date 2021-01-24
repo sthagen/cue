@@ -201,14 +201,33 @@ func (e *Unifier) Unify(c *OpContext, v *Vertex, state VertexStatus) {
 			v.Closed = true
 		}
 
-		ignore := false
 		if v.Parent != nil {
 			if v.Parent.Closed {
 				v.Closed = true
 			}
 		}
 
-		if !v.Label.IsInt() && v.Parent != nil && !ignore && state == Finalized {
+		// TODO(perf): ideally we should always perform a closedness check if
+		// state is Finalized. This is currently not possible when computing a
+		// partial disjunction as the closedness information is not yet
+		// complete, possibly leading to a disjunct to be rejected prematurely.
+		// It is probably possible to fix this if we could add StructInfo
+		// structures demarked per conjunct.
+		//
+		// In practice this should not be a problem: when disjuncts originate
+		// from the same disjunct, they will have the same StructInfos, and thus
+		// Equal is able to equate them even in the precense of optional field.
+		// In general, combining any limited set of disjuncts will soon reach
+		// a fixed point where duplicate elements can be eliminated this way.
+		//
+		// Note that not checking closedness is irrelevant for disjunctions of
+		// scalars. This means it also doesn't hurt performance where structs
+		// have a discriminator field (e.g. Kubernetes). We should take care,
+		// though, that any potential performance issues are eliminated for
+		// Protobuf-like oneOf fields.
+		ignore := state != Finalized || n.skipNonMonotonicChecks()
+
+		if !v.Label.IsInt() && v.Parent != nil && !ignore {
 			// Visit arcs recursively to validate and compute error.
 			if _, err := verifyArc2(c, v.Label, v, v.Closed); err != nil {
 				// Record error in child node to allow recording multiple
@@ -264,7 +283,8 @@ func (e *Unifier) Unify(c *OpContext, v *Vertex, state VertexStatus) {
 		n.doNotify()
 
 		if !n.done() {
-			if len(n.disjunctions) > 0 && v.BaseValue == cycle {
+			switch {
+			case len(n.disjunctions) > 0 && v.BaseValue == cycle:
 				// We disallow entering computations of disjunctions with
 				// incomplete data.
 				if state == Finalized {
@@ -276,12 +296,16 @@ func (e *Unifier) Unify(c *OpContext, v *Vertex, state VertexStatus) {
 					n.node.UpdateStatus(Partial)
 				}
 				return
-			}
-		}
 
-		if !n.done() && state <= Partial {
-			n.node.UpdateStatus(Partial)
-			return
+			case state <= Partial:
+				n.node.UpdateStatus(Partial)
+				return
+
+			case state <= AllArcs:
+				c.AddBottom(n.incompleteErrors())
+				n.node.UpdateStatus(Partial)
+				return
+			}
 		}
 
 		if s := v.Status(); state <= s {
@@ -368,20 +392,21 @@ func (e *Unifier) Unify(c *OpContext, v *Vertex, state VertexStatus) {
 }
 
 func (n *nodeContext) doNotify() {
-	if n.errs != nil && len(n.notify) > 0 {
-		for _, v := range n.notify {
-			if v.state == nil {
-				if b, ok := v.BaseValue.(*Bottom); ok {
-					v.BaseValue = CombineErrors(nil, b, n.errs)
-				} else {
-					v.BaseValue = n.errs
-				}
-			} else {
-				v.state.addBottom(n.errs)
-			}
-		}
-		n.notify = n.notify[:0]
+	if n.errs == nil || len(n.notify) == 0 {
+		return
 	}
+	for _, v := range n.notify {
+		if v.state == nil {
+			if b, ok := v.BaseValue.(*Bottom); ok {
+				v.BaseValue = CombineErrors(nil, b, n.errs)
+			} else {
+				v.BaseValue = n.errs
+			}
+		} else {
+			v.state.addBottom(n.errs)
+		}
+	}
+	n.notify = n.notify[:0]
 }
 
 func isStruct(v *Vertex) bool {
@@ -416,25 +441,7 @@ func (n *nodeContext) postDisjunct(state VertexStatus) {
 	default:
 		if n.node.BaseValue == cycle {
 			if !n.done() {
-				// collect incomplete errors.
-				var err *Bottom // n.incomplete
-				for _, d := range n.dynamicFields {
-					err = CombineErrors(nil, err, d.err)
-				}
-				for _, c := range n.forClauses {
-					err = CombineErrors(nil, err, c.err)
-				}
-				for _, c := range n.ifClauses {
-					err = CombineErrors(nil, err, c.err)
-				}
-				for _, x := range n.exprs {
-					err = CombineErrors(nil, err, x.err)
-				}
-				if err == nil {
-					// safeguard.
-					err = incompleteSentinel
-				}
-				n.node.BaseValue = err
+				n.node.BaseValue = n.incompleteErrors()
 			} else {
 				n.node.BaseValue = nil
 			}
@@ -487,7 +494,9 @@ func (n *nodeContext) postDisjunct(state VertexStatus) {
 				}
 			}
 			// MOVE BELOW
-			if v := n.node.Value(); v != nil && IsConcrete(v) {
+			// TODO(perf): only delay processing of actual non-monotonic checks.
+			skip := n.skipNonMonotonicChecks()
+			if v := n.node.Value(); v != nil && IsConcrete(v) && !skip {
 				for _, v := range n.checks {
 					// TODO(errors): make Validate return bottom and generate
 					// optimized conflict message. Also track and inject IDs
@@ -536,6 +545,28 @@ func (n *nodeContext) postDisjunct(state VertexStatus) {
 	}
 
 	n.completeArcs(state)
+}
+
+func (n *nodeContext) incompleteErrors() *Bottom {
+	// collect incomplete errors.
+	var err *Bottom // n.incomplete
+	for _, d := range n.dynamicFields {
+		err = CombineErrors(nil, err, d.err)
+	}
+	for _, c := range n.forClauses {
+		err = CombineErrors(nil, err, c.err)
+	}
+	for _, c := range n.ifClauses {
+		err = CombineErrors(nil, err, c.err)
+	}
+	for _, x := range n.exprs {
+		err = CombineErrors(nil, err, x.err)
+	}
+	if err == nil {
+		// safeguard.
+		err = incompleteSentinel
+	}
+	return err
 }
 
 func (n *nodeContext) completeArcs(state VertexStatus) {
@@ -744,6 +775,7 @@ func (e *Unifier) newNodeContext(ctx *OpContext, node *Vertex) *nodeContext {
 			node:          node,
 			kind:          TopKind,
 			arcMap:        n.arcMap[:0],
+			notify:        n.notify[:0],
 			checks:        n.checks[:0],
 			dynamicFields: n.dynamicFields[:0],
 			ifClauses:     n.ifClauses[:0],
