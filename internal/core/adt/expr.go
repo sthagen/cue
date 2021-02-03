@@ -79,7 +79,7 @@ func (x *StructLit) evaluate(c *OpContext) Value {
 	// used in a context where more conjuncts are added. It may also lead
 	// to disjuncts being in a partially expanded state, leading to
 	// misaligned nodeContexts.
-	c.Unifier.Unify(c, v, AllArcs)
+	c.Unify(v, AllArcs)
 	return v
 }
 
@@ -287,7 +287,7 @@ func (x *ListLit) evaluate(c *OpContext) Value {
 	e := c.Env(0)
 	v := &Vertex{Conjuncts: []Conjunct{{e, x, CloseInfo{}}}}
 	// TODO: should be AllArcs and then use Finalize for builtins?
-	c.Unifier.Unify(c, v, Finalized) // TODO: also partial okay?
+	c.Unify(v, Finalized) // TODO: also partial okay?
 	return v
 }
 
@@ -452,15 +452,110 @@ func (x *BoundExpr) Source() ast.Node {
 }
 
 func (x *BoundExpr) evaluate(ctx *OpContext) Value {
+	v := ctx.value(x.Expr)
+	if isError(v) {
+		return v
+	}
+
+	switch k := v.Kind(); k {
+	case IntKind, FloatKind, NumKind, StringKind, BytesKind:
+	case NullKind:
+		if x.Op != NotEqualOp {
+			err := ctx.NewPosf(pos(x.Expr),
+				"cannot use null for bound %s", x.Op)
+			return &Bottom{Err: err}
+		}
+	default:
+		mask := IntKind | FloatKind | NumKind | StringKind | BytesKind
+		if x.Op == NotEqualOp {
+			mask |= NullKind
+		}
+		if k&mask != 0 {
+			ctx.addErrf(IncompleteError, ctx.pos(),
+				"non-concrete value %s for bound %s", ctx.Str(x.Expr), x.Op)
+			return nil
+		}
+		err := ctx.NewPosf(pos(x.Expr),
+			"invalid value %s (type %s) for bound %s",
+			ctx.Str(v), k, x.Op)
+		return &Bottom{Err: err}
+	}
+
 	if v, ok := x.Expr.(Value); ok {
 		if v == nil || v.Concreteness() > Concrete {
 			return ctx.NewErrf("bound has fixed non-concrete value")
 		}
 		return &BoundValue{x.Src, x.Op, v}
 	}
-	v := ctx.value(x.Expr)
-	if isError(v) {
-		return v
+
+	// This simplifies boundary expressions. It is an alternative to an
+	// evaluation strategy that makes nodes increasingly more specific.
+	//
+	// For instance, a completely different implementation would be to allow
+	// the precense of a concrete value to ignore incomplete errors.
+	//
+	// TODO: consider an alternative approach.
+	switch y := v.(type) {
+	case *BoundValue:
+		switch {
+		case y.Op == NotEqualOp:
+			switch x.Op {
+			case LessEqualOp, LessThanOp, GreaterEqualOp, GreaterThanOp:
+				// <(!=3)  =>  number
+				// Smaller than an arbitrarily large number is any number.
+				return &BasicType{K: y.Kind()}
+			case NotEqualOp:
+				// !=(!=3) ==> 3
+				// Not a value that is anything but a given value is that
+				// given value.
+				return y.Value
+			}
+
+		case x.Op == NotEqualOp:
+			// Invert if applicable.
+			switch y.Op {
+			case LessEqualOp:
+				return &BoundValue{x.Src, GreaterThanOp, y.Value}
+			case LessThanOp:
+				return &BoundValue{x.Src, GreaterEqualOp, y.Value}
+			case GreaterEqualOp:
+				return &BoundValue{x.Src, LessThanOp, y.Value}
+			case GreaterThanOp:
+				return &BoundValue{x.Src, LessEqualOp, y.Value}
+			}
+
+		case (x.Op == LessThanOp || x.Op == LessEqualOp) &&
+			(y.Op == GreaterThanOp || y.Op == GreaterEqualOp),
+			(x.Op == GreaterThanOp || x.Op == GreaterEqualOp) &&
+				(y.Op == LessThanOp || y.Op == LessEqualOp):
+			// <(>=3)
+			// Something smaller than an arbitrarily large number is any number.
+			return &BasicType{K: y.Kind()}
+
+		case x.Op == LessThanOp &&
+			(y.Op == LessEqualOp || y.Op == LessThanOp),
+			x.Op == GreaterThanOp &&
+				(y.Op == GreaterEqualOp || y.Op == GreaterThanOp):
+			// <(<=x)  => <x
+			// <(<x)   => <x
+			// Less than something that is less or equal to x is less than x.
+			return &BoundValue{x.Src, x.Op, y.Value}
+
+		case x.Op == LessEqualOp &&
+			(y.Op == LessEqualOp || y.Op == LessThanOp),
+			x.Op == GreaterEqualOp &&
+				(y.Op == GreaterEqualOp || y.Op == GreaterThanOp):
+			// <=(<x)   => <x
+			// <=(<=x)  => <=x
+			// Less or equal than something that is less than x is less than x.
+			return y
+		}
+
+	case *BasicType:
+		switch x.Op {
+		case LessEqualOp, LessThanOp, GreaterEqualOp, GreaterThanOp:
+			return y
+		}
 	}
 	if v.Concreteness() > Concrete {
 		ctx.addErrf(IncompleteError, ctx.pos(),
@@ -533,8 +628,11 @@ type NodeLink struct {
 func (x *NodeLink) Kind() Kind {
 	return x.Node.Kind()
 }
-func (x *NodeLink) Source() ast.Node             { return x.Node.Source() }
-func (x *NodeLink) resolve(c *OpContext) *Vertex { return x.Node }
+func (x *NodeLink) Source() ast.Node { return x.Node.Source() }
+
+func (x *NodeLink) resolve(c *OpContext, state VertexStatus) *Vertex {
+	return x.Node
+}
 
 // A FieldReference represents a lexical reference to a field.
 //
@@ -553,10 +651,10 @@ func (x *FieldReference) Source() ast.Node {
 	return x.Src
 }
 
-func (x *FieldReference) resolve(c *OpContext) *Vertex {
+func (x *FieldReference) resolve(c *OpContext, state VertexStatus) *Vertex {
 	n := c.relNode(x.UpCount)
 	pos := pos(x)
-	return c.lookup(n, pos, x.Label)
+	return c.lookup(n, pos, x.Label, state)
 }
 
 // A LabelReference refers to the string or integer value of a label.
@@ -616,13 +714,13 @@ func (x *DynamicReference) Source() ast.Node {
 	return x.Src
 }
 
-func (x *DynamicReference) resolve(ctx *OpContext) *Vertex {
+func (x *DynamicReference) resolve(ctx *OpContext, state VertexStatus) *Vertex {
 	e := ctx.Env(x.UpCount)
 	frame := ctx.PushState(e, x.Src)
 	v := ctx.value(x.Label)
 	ctx.PopState(frame)
 	f := ctx.Label(x.Label, v)
-	return ctx.lookup(e.Vertex, pos(x), f)
+	return ctx.lookup(e.Vertex, pos(x), f, state)
 }
 
 // An ImportReference refers to an imported package.
@@ -644,7 +742,7 @@ func (x *ImportReference) Source() ast.Node {
 	return x.Src
 }
 
-func (x *ImportReference) resolve(ctx *OpContext) *Vertex {
+func (x *ImportReference) resolve(ctx *OpContext, state VertexStatus) *Vertex {
 	path := x.ImportPath.StringValue(ctx)
 	v, _ := ctx.Runtime.LoadImport(path)
 	return v
@@ -668,7 +766,7 @@ func (x *LetReference) Source() ast.Node {
 	return x.Src
 }
 
-func (x *LetReference) resolve(c *OpContext) *Vertex {
+func (x *LetReference) resolve(c *OpContext, state VertexStatus) *Vertex {
 	e := c.Env(x.UpCount)
 	label := e.Vertex.Label
 	if x.X == nil {
@@ -702,12 +800,12 @@ func (x *SelectorExpr) Source() ast.Node {
 	return x.Src
 }
 
-func (x *SelectorExpr) resolve(c *OpContext) *Vertex {
-	n := c.node(x, x.X, x.Sel.IsRegular())
+func (x *SelectorExpr) resolve(c *OpContext, state VertexStatus) *Vertex {
+	n := c.node(x, x.X, x.Sel.IsRegular(), state)
 	if n == emptyNode {
 		return n
 	}
-	return c.lookup(n, x.Src.Sel.Pos(), x.Sel)
+	return c.lookup(n, x.Src.Sel.Pos(), x.Sel, state)
 }
 
 // IndexExpr is like a selector, but selects an index.
@@ -727,15 +825,15 @@ func (x *IndexExpr) Source() ast.Node {
 	return x.Src
 }
 
-func (x *IndexExpr) resolve(ctx *OpContext) *Vertex {
+func (x *IndexExpr) resolve(ctx *OpContext, state VertexStatus) *Vertex {
 	// TODO: support byte index.
-	n := ctx.node(x, x.X, true)
+	n := ctx.node(x, x.X, true, state)
 	i := ctx.value(x.Index)
 	if n == emptyNode {
 		return n
 	}
 	f := ctx.Label(x.Index, i)
-	return ctx.lookup(n, x.Src.Index.Pos(), f)
+	return ctx.lookup(n, x.Src.Index.Pos(), f, state)
 }
 
 // A SliceExpr represents a slice operation. (Not currently in spec.)
@@ -958,7 +1056,7 @@ func (x *BinaryExpr) evaluate(c *OpContext) Value {
 	if x.Op == AndOp {
 		// Anonymous Arc
 		v := &Vertex{Conjuncts: []Conjunct{{env, x, CloseInfo{}}}}
-		c.Unifier.Unify(c, v, Finalized)
+		c.Unify(v, Finalized)
 		return v
 	}
 
@@ -966,30 +1064,21 @@ func (x *BinaryExpr) evaluate(c *OpContext) Value {
 		return nil
 	}
 
-	left, _ := c.Concrete(env, x.X, x.Op)
-	right, _ := c.Concrete(env, x.Y, x.Op)
-
-	leftKind := kind(left)
-	rightKind := kind(right)
-
 	// TODO: allow comparing to a literal Bottom only. Find something more
 	// principled perhaps. One should especially take care that two values
 	// evaluating to Bottom don't evaluate to true. For now we check for
 	// Bottom here and require that one of the values be a Bottom literal.
-	if isLiteralBottom(x.X) || isLiteralBottom(x.Y) {
-		if b := c.validate(left); b != nil {
-			left = b
+	if x.Op == EqualOp || x.Op == NotEqualOp {
+		if isLiteralBottom(x.X) {
+			return c.validate(env, x.Src, x.Y, x.Op)
 		}
-		if b := c.validate(right); b != nil {
-			right = b
-		}
-		switch x.Op {
-		case EqualOp:
-			return &Bool{x.Src, leftKind == rightKind}
-		case NotEqualOp:
-			return &Bool{x.Src, leftKind != rightKind}
+		if isLiteralBottom(x.Y) {
+			return c.validate(env, x.Src, x.X, x.Op)
 		}
 	}
+
+	left, _ := c.Concrete(env, x.X, x.Op)
+	right, _ := c.Concrete(env, x.Y, x.Op)
 
 	if err := CombineErrors(x.Src, left, right); err != nil {
 		return err
@@ -1000,6 +1089,59 @@ func (x *BinaryExpr) evaluate(c *OpContext) Value {
 	}
 
 	return BinOp(c, x.Op, left, right)
+}
+
+func (c *OpContext) validate(env *Environment, src ast.Node, x Expr, op Op) (r Value) {
+	s := c.PushState(env, src)
+	if c.nonMonotonicLookupNest == 0 {
+		c.nonMonotonicGeneration++
+	}
+
+	var match bool
+	v := c.evalState(x, Partial)
+	// NOTE: using Unwrap is maybe note entirely accurate, as it may discard
+	// a future error. However, if it does so, the error will at least be
+	// reported elsewhere.
+	switch b := Unwrap(v).(type) {
+	case nil:
+	case *Bottom:
+		if b.Code == CycleError {
+			c.PopState(s)
+			c.AddBottom(b)
+			return nil
+		}
+		match = op == EqualOp
+		// We have a nonmonotonic use of a failure. Referenced fields should
+		// not be added anymore.
+		c.nonMonotonicRejectNest++
+		c.evalState(x, Partial)
+		c.nonMonotonicRejectNest--
+
+	default:
+		// TODO(cycle): if EqualOp:
+		// - ensure to pass special status to if clause or keep a track of "hot"
+		//   paths.
+		// - evaluate hypothetical struct
+		// - walk over all fields and verify that fields are not contradicting
+		//   previously marked fields.
+		//
+		switch {
+		case b.Concreteness() > Concrete:
+			// TODO: mimic comparison to bottom semantics. If it is a valid
+			// value, check for concreteness that this level only. This
+			// should ultimately be replaced with an exists and valid
+			// builtin.
+			match = op == EqualOp
+		default:
+			match = op != EqualOp
+		}
+		c.nonMonotonicLookupNest++
+		c.evalState(x, Partial)
+		c.nonMonotonicLookupNest--
+	}
+
+	c.PopState(s)
+	return &Bool{src, match}
 }
 
 // A CallExpr represents a call to a builtin.
@@ -1186,7 +1328,7 @@ func (x *Builtin) call(c *OpContext, p token.Pos, args []Value) Expr {
 			env := c.Env(0)
 			x := &BinaryExpr{Op: AndOp, X: v, Y: a}
 			n := &Vertex{Conjuncts: []Conjunct{{env, x, CloseInfo{}}}}
-			c.Unifier.Unify(c, n, Finalized)
+			c.Unify(n, Finalized)
 			if _, ok := n.BaseValue.(*Bottom); ok {
 				c.addErrf(0, pos(a),
 					"cannot use %s as %s in argument %d to %s",
@@ -1311,7 +1453,7 @@ func (x *DisjunctionExpr) Source() ast.Node {
 func (x *DisjunctionExpr) evaluate(c *OpContext) Value {
 	e := c.Env(0)
 	v := &Vertex{Conjuncts: []Conjunct{{e, x, CloseInfo{}}}}
-	c.Unifier.Unify(c, v, Finalized) // TODO: also partial okay?
+	c.Unify(v, Finalized) // TODO: also partial okay?
 	// TODO: if the disjunction result originated from a literal value, we may
 	// consider the result closed to create more permanent errors.
 	return v
@@ -1379,13 +1521,13 @@ func (x *ForClause) Source() ast.Node {
 }
 
 func (x *ForClause) yield(c *OpContext, f YieldFunc) {
-	n := c.node(x, x.Src, true)
+	n := c.node(x, x.Src, true, AllArcs)
 	for _, a := range n.Arcs {
 		if !a.Label.IsRegular() {
 			continue
 		}
 
-		c.Unify(c, a, Partial)
+		c.Unify(a, Partial)
 
 		n := &Vertex{status: Finalized}
 

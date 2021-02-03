@@ -7,6 +7,9 @@ import (
 
 workflowsDir: *"./" | string @tag(workflowsDir)
 
+_#masterBranch:      "master"
+_#releaseTagPattern: "v*"
+
 workflows: [...{file: string, schema: (json.#Workflow & {})}]
 workflows: [
 	{
@@ -33,12 +36,21 @@ test: _#bashWorkflow & {
 	on: {
 		push: {
 			branches: ["**"] // any branch (including '/' namespaced branches)
-			"tags-ignore": ["v*"]
+			"tags-ignore": [_#releaseTagPattern]
 		}
 	}
 
 	jobs: {
+		start: {
+			"runs-on": _#linuxMachine
+			steps: [...(_ & {if: "${{ \(_#isCLCITestBranch) }}"})]
+			steps: [
+				_#writeCookiesFile,
+				_#startCLBuild,
+			]
+		}
 		test: {
+			needs:     "start"
 			strategy:  _#testStrategy
 			"runs-on": "${{ matrix.os }}"
 			steps: [
@@ -48,7 +60,9 @@ test: _#bashWorkflow & {
 				_#cacheGoModules,
 				_#goGenerate,
 				_#goTest,
-				_#goTestRace,
+				_#goTestRace & {
+					if: "${{ \(_#isMaster) || \(_#isCLCITestBranch) && matrix.go-version == '\(_#latestStableGo)' && matrix.os == '\(_#linuxMachine)' }}"
+				},
 				_#goReleaseCheck,
 				_#checkGitClean,
 				_#pullThroughProxy,
@@ -85,10 +99,10 @@ test: _#bashWorkflow & {
 
 	// _#isMaster is an expression that evaluates to true if the
 	// job is running as a result of a master commit push
-	_#isMaster: "github.ref == '\(_#branchRefPrefix)master'"
+	_#isMaster: "github.ref == '\(_#branchRefPrefix+_#masterBranch)'"
 
 	_#pullThroughProxy: _#step & {
-		name: "Pull this commit through the proxy on master"
+		name: "Pull this commit through the proxy on \(_#masterBranch)"
 		run: """
 			v=$(git rev-parse HEAD)
 			cd $(mktemp -d)
@@ -96,6 +110,13 @@ test: _#bashWorkflow & {
 			GOPROXY=https://proxy.golang.org go get -d cuelang.org/go@$v
 			"""
 		if: "${{ \(_#isMaster) }}"
+	}
+
+	_#startCLBuild: _#step & {
+		name: "Update Gerrit CL message with starting message"
+		run:  (_#gerrit._#setCodeReview & {
+			#args: message: "Started the build... see progress at ${{ github.event.repository.html_url }}/actions/runs/${{ github.run_id }}"
+		}).res
 	}
 
 	_#failCLBuild: _#step & {
@@ -149,13 +170,6 @@ test_dispatch: _#bashWorkflow & {
 			if:        "${{ startsWith(github.event.action, 'Build for refs/changes/') }}"
 			"runs-on": _#linuxMachine
 			steps: [
-				_#writeCookiesFile,
-				_#step & {
-					name: "Update Gerrit CL message with starting message"
-					run:  (_#gerrit._#setCodeReview & {
-						#args: message: "Started the build... see progress at ${{ github.event.repository.html_url }}/actions/runs/${{ github.run_id }}"
-					}).res
-				},
 				_#step & {
 					name: "Checkout ref"
 					run:  """
@@ -168,26 +182,12 @@ test_dispatch: _#bashWorkflow & {
 			]
 		}
 	}
-
-	_#gerrit: {
-		_#setCodeReview: {
-			#args: {
-				message: string
-				labels?: {
-					"Code-Review": int
-				}
-			}
-			res: #"""
-			curl -f -s -H "Content-Type: application/json" --request POST --data '\#(encjson.Marshal(#args))' -b ~/.gitcookies https://cue-review.googlesource.com/a/changes/${{ github.event.client_payload.changeID }}/revisions/${{ github.event.client_payload.commit }}/review
-			"""#
-		}
-	}
 }
 
 release: _#bashWorkflow & {
 
 	name: "Release"
-	on: push: tags: ["v*"]
+	on: push: tags: [_#releaseTagPattern]
 	jobs: {
 		goreleaser: {
 			"runs-on": _#linuxMachine
@@ -200,7 +200,7 @@ release: _#bashWorkflow & {
 			}, {
 				name: "Run GoReleaser"
 				env: GITHUB_TOKEN: "${{ secrets.ACTIONS_GITHUB_TOKEN }}"
-				uses: "docker://goreleaser/goreleaser:latest"
+				uses: "docker://goreleaser/goreleaser:v0.110.0"
 				with: args: "release --rm-dist"
 			}]
 		}
@@ -245,7 +245,7 @@ release: _#bashWorkflow & {
 rebuild_tip_cuelang_org: _#bashWorkflow & {
 
 	name: "Push to tip"
-	on: push: branches: ["master"]
+	on: push: branches: [_#masterBranch]
 	jobs: push: {
 		"runs-on": _#linuxMachine
 		steps: [{
@@ -265,7 +265,8 @@ _#job:  ((json.#Workflow & {}).jobs & {x: _}).x
 _#step: ((_#job & {steps:                 _}).steps & [_])[0]
 
 // We need at least go1.14 for code generation
-_#codeGenGo: "1.14.9"
+_#codeGenGo:      "1.14.14"
+_#latestStableGo: "1.15.x"
 
 _#linuxMachine:   "ubuntu-18.04"
 _#macosMachine:   "macos-10.15"
@@ -275,7 +276,7 @@ _#testStrategy: {
 	"fail-fast": false
 	matrix: {
 		// Use a stable version of 1.14.x for go generate
-		"go-version": ["1.13.x", _#codeGenGo, "1.15.x"]
+		"go-version": [_#codeGenGo, _#latestStableGo, "1.16.0-rc1"]
 		os: [_#linuxMachine, _#macosMachine, _#windowsMachine]
 	}
 }
@@ -283,7 +284,10 @@ _#testStrategy: {
 _#installGo: _#step & {
 	name: "Install Go"
 	uses: "actions/setup-go@v2"
-	with: "go-version": "${{ matrix.go-version }}"
+	with: {
+		"go-version": "${{ matrix.go-version }}"
+		stable:       false
+	}
 }
 
 _#checkoutCode: _#step & {

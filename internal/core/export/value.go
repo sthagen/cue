@@ -66,14 +66,6 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 
 		case !x.IsIncomplete() || len(n.Conjuncts) == 0:
 			result = e.bottom(x)
-
-		default:
-			// fall back to expression mode
-			a := []ast.Expr{}
-			for _, c := range n.Conjuncts {
-				a = append(a, e.expr(c.Expr()))
-			}
-			result = ast.NewBinExpr(token.AND, a...)
 		}
 
 	case adt.Value:
@@ -84,7 +76,15 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 		}
 
 	default:
-		panic("unknow value")
+		panic("unknown value")
+	}
+	if result == nil {
+		// fall back to expression mode
+		a := []ast.Expr{}
+		for _, c := range n.Conjuncts {
+			a = append(a, e.expr(c.Expr()))
+		}
+		result = ast.NewBinExpr(token.AND, a...)
 	}
 	return result
 }
@@ -370,6 +370,12 @@ func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 		e.addEmbed(e.value(x))
 	}
 
+	if e.cfg.ShowAttributes {
+		for _, a := range ExtractDeclAttrs(v.Conjuncts) {
+			s.Elts = append(s.Elts, a)
+		}
+	}
+
 	p := e.cfg
 	for _, label := range VertexFeatures(v) {
 		show := false
@@ -405,7 +411,7 @@ func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 
 			arc = &adt.Vertex{Label: label}
 			v.MatchAndInsert(e.ctx, arc)
-			if len(v.Conjuncts) == 0 {
+			if len(arc.Conjuncts) == 0 {
 				continue
 			}
 

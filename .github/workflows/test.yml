@@ -8,14 +8,30 @@ on:
     tags-ignore:
     - v*
 jobs:
+  start:
+    runs-on: ubuntu-18.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - if: ${{ startsWith(github.ref, 'refs/heads/ci/') }}
+      name: Write the gitcookies file
+      run: echo "${{ secrets.gerritCookie }}" > ~/.gitcookies
+    - if: ${{ startsWith(github.ref, 'refs/heads/ci/') }}
+      name: Update Gerrit CL message with starting message
+      run: 'curl -f -s -H "Content-Type: application/json" --request POST --data ''{"message":"Started
+        the build... see progress at ${{ github.event.repository.html_url }}/actions/runs/${{
+        github.run_id }}"}'' -b ~/.gitcookies https://cue-review.googlesource.com/a/changes/$(basename
+        $(dirname $GITHUB_REF))/revisions/$(basename $GITHUB_REF)/review'
   test:
+    needs: start
     strategy:
       fail-fast: false
       matrix:
         go-version:
-        - 1.13.x
-        - 1.14.9
+        - 1.14.14
         - 1.15.x
+        - 1.16.0-rc1
         os:
         - ubuntu-18.04
         - macos-10.15
@@ -31,6 +47,7 @@ jobs:
       uses: actions/setup-go@v2
       with:
         go-version: ${{ matrix.go-version }}
+        stable: false
     - name: Checkout code
       uses: actions/checkout@v2
     - name: Cache Go modules
@@ -40,12 +57,14 @@ jobs:
         key: ${{ runner.os }}-${{ matrix.go-version }}-go-${{ hashFiles('**/go.sum')
           }}
         restore-keys: ${{ runner.os }}-${{ matrix.go-version }}-go-
-    - if: matrix.go-version == '1.14.9' && matrix.os != 'windows-2019'
+    - if: matrix.go-version == '1.14.14' && matrix.os != 'windows-2019'
       name: Generate
       run: go generate ./...
     - name: Test
       run: go test ./...
-    - name: Test with -race
+    - if: ${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci/')
+        && matrix.go-version == '1.15.x' && matrix.os == 'ubuntu-18.04' }}
+      name: Test with -race
       run: go test -race ./...
     - name: gorelease check
       run: go run golang.org/x/exp/cmd/gorelease
