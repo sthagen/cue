@@ -1,3 +1,17 @@
+// Copyright 2021 The CUE Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ci
 
 import (
@@ -17,8 +31,8 @@ workflows: [
 		schema: test
 	},
 	{
-		file:   "test_dispatch.yml"
-		schema: test_dispatch
+		file:   "repository_dispatch.yml"
+		schema: repository_dispatch
 	},
 	{
 		file:   "release.yml"
@@ -107,7 +121,7 @@ test: _#bashWorkflow & {
 			v=$(git rev-parse HEAD)
 			cd $(mktemp -d)
 			go mod init mod.com
-			GOPROXY=https://proxy.golang.org go get -d cuelang.org/go@$v
+			GOPROXY=https://proxy.golang.org go get -d cuelang.org/go/cmd/cue@$v
 			"""
 		if: "${{ \(_#isMaster) }}"
 	}
@@ -161,9 +175,9 @@ test: _#bashWorkflow & {
 	}
 }
 
-test_dispatch: _#bashWorkflow & {
+repository_dispatch: _#bashWorkflow & {
 
-	name: "Test Dispatch"
+	name: "Repository Dispatch"
 	on: ["repository_dispatch"]
 	jobs: {
 		start: {
