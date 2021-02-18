@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"flag"
 	"os"
 	"testing"
 
@@ -23,8 +22,6 @@ import (
 )
 
 var _ = errors.Print
-
-var update = flag.Bool("update", os.Getenv("CUE_UPDATE") != "", "update the test files")
 
 func printConfig(t *testing.T) *errors.Config {
 	t.Helper()

@@ -130,6 +130,9 @@ type ID int32
 // evalCached is used to look up let expressions. Caching let expressions
 // prevents a possible combinatorial explosion.
 func (e *Environment) evalCached(c *OpContext, x Expr) Value {
+	if v, ok := x.(Value); ok {
+		return v
+	}
 	v, ok := e.cache[x]
 	if !ok {
 		if e.cache == nil {
@@ -228,6 +231,8 @@ type StructInfo struct {
 	Embedding bool
 }
 
+// TODO(perf): this could be much more aggressive for eliminating structs that
+// are immaterial for closing.
 func (s *StructInfo) useForAccept() bool {
 	if c := s.closeInfo; c != nil {
 		return !c.noCheck
@@ -483,14 +488,15 @@ func Unwrap(v Value) Value {
 
 // OptionalType is a bit field of the type of optional constraints in use by an
 // Acceptor.
-type OptionalType int
+type OptionalType int8
 
 const (
-	HasField      OptionalType = 1 << iota // X: T
-	HasDynamic                             // (X): T or "\(X)": T
-	HasPattern                             // [X]: T
-	HasAdditional                          // ...T
-	IsOpen                                 // Defined for all fields
+	HasField          OptionalType = 1 << iota // X: T
+	HasDynamic                                 // (X): T or "\(X)": T
+	HasPattern                                 // [X]: T
+	HasComplexPattern                          // anything but a basic type
+	HasAdditional                              // ...T
+	IsOpen                                     // Defined for all fields
 )
 
 func (v *Vertex) Kind() Kind {
@@ -637,7 +643,14 @@ func (v *Vertex) GetArc(c *OpContext, f Feature) (arc *Vertex, isNew bool) {
 	return arc, isNew
 }
 
-func (v *Vertex) Source() ast.Node { return nil }
+func (v *Vertex) Source() ast.Node {
+	if v != nil {
+		if b, ok := v.BaseValue.(Value); ok {
+			return b.Source()
+		}
+	}
+	return nil
+}
 
 // AddConjunct adds the given Conjuncts to v if it doesn't already exist.
 func (v *Vertex) AddConjunct(c Conjunct) *Bottom {

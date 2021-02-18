@@ -42,6 +42,10 @@ workflows: [
 		file:   "rebuild_tip_cuelang_org.yml"
 		schema: rebuild_tip_cuelang_org
 	},
+	{
+		file:   "mirror.yml"
+		schema: mirror
+	},
 ]
 
 test: _#bashWorkflow & {
@@ -72,6 +76,10 @@ test: _#bashWorkflow & {
 				_#installGo,
 				_#checkoutCode,
 				_#cacheGoModules,
+				_#setGoBuildTags & {
+					_#tags: "long"
+					if:     "${{ \(_#isMaster) }}"
+				},
 				_#goGenerate,
 				_#goTest,
 				_#goTestRace & {
@@ -176,24 +184,65 @@ test: _#bashWorkflow & {
 }
 
 repository_dispatch: _#bashWorkflow & {
+	// These constants are defined by github.com/cue-sh/tools/cmd/cueckoo
+	_#runtrybot: "runtrybot"
+	_#mirror:    "mirror"
+	_#importpr:  "importpr"
+
+	_#dispatchJob: _#job & {
+		_#type:    string
+		"runs-on": _#linuxMachine
+		if:        "${{ github.event.client_payload.type == '\(_#type)' }}"
+	}
 
 	name: "Repository Dispatch"
 	on: ["repository_dispatch"]
 	jobs: {
-		start: {
-			if:        "${{ startsWith(github.event.action, 'Build for refs/changes/') }}"
-			"runs-on": _#linuxMachine
+		"\(_#runtrybot)": _#dispatchJob & {
+			_#type: _#runtrybot
 			steps: [
 				_#step & {
-					name: "Checkout ref"
+					name: "Trigger trybot"
 					run:  """
 						\(_#tempCueckooGitDir)
-						git fetch https://cue-review.googlesource.com/cue ${{ github.event.client_payload.ref }}
-						git checkout -b ci/${{ github.event.client_payload.changeID }}/${{ github.event.client_payload.commit }} FETCH_HEAD
-						git push https://github.com/cuelang/cue ci/${{ github.event.client_payload.changeID }}/${{ github.event.client_payload.commit }}
+						git fetch https://cue-review.googlesource.com/cue ${{ github.event.client_payload.payload.ref }}
+						git checkout -b ci/${{ github.event.client_payload.payload.changeID }}/${{ github.event.client_payload.payload.commit }} FETCH_HEAD
+						git push https://github.com/cuelang/cue ci/${{ github.event.client_payload.payload.changeID }}/${{ github.event.client_payload.payload.commit }}
 						"""
 				},
 			]
+		}
+		"\(_#mirror)": _#dispatchJob & {
+			_#type: _#mirror
+			steps:  _#copybaraSteps & {_
+				_#name: "Mirror Gerrit to GitHub"
+				_#cmd:  "github"
+			}
+		}
+		"\(_#importpr)": _#dispatchJob & {
+			_#type: _#importpr
+			steps:  _#copybaraSteps & {_
+				_#name: "Import PR #${{ github.event.client_payload.commit }} from GitHub to Gerrit"
+				_#cmd:  "github-pr ${{ github.event.client_payload.payload.pr }}"
+			}
+		}
+	}
+}
+
+mirror: _#bashWorkflow & {
+	name: "Scheduled repo mirror"
+	on:
+		schedule: [{
+			cron: "*/30 * * * *" // every 30 mins
+		}]
+
+	jobs: {
+		"mirror": {
+			"runs-on": _#linuxMachine
+			steps:     _#copybaraSteps & {_
+				_#name: "Mirror Gerrit to GitHub"
+				_#cmd:  "github"
+			}
 		}
 	}
 }
@@ -205,53 +254,59 @@ release: _#bashWorkflow & {
 	jobs: {
 		goreleaser: {
 			"runs-on": _#linuxMachine
-			steps: [{
-				name: "Checkout code"
-				uses: "actions/checkout@v2"
-			}, {
-				name: "Unshallow" // required for the changelog to work correctly.
-				run:  "git fetch --prune --unshallow"
-			}, {
-				name: "Run GoReleaser"
-				env: GITHUB_TOKEN: "${{ secrets.ACTIONS_GITHUB_TOKEN }}"
-				uses: "docker://goreleaser/goreleaser:v0.110.0"
-				with: args: "release --rm-dist"
-			}]
+			steps: [
+				_#checkoutCode & {
+					with: "fetch-depth": 0
+				},
+				_#installGo & {
+					with: version: _#latestStableGo
+				},
+				_#step & {
+					name: "Run GoReleaser"
+					env: GITHUB_TOKEN: "${{ secrets.ACTIONS_GITHUB_TOKEN }}"
+					uses: "goreleaser/goreleaser-action@v2"
+					with: {
+						args:    "release --rm-dist"
+						version: "v0.155.1"
+					}
+				},
+			]
 		}
 		docker: {
 			name:      "docker"
 			"runs-on": _#linuxMachine
-			steps: [{
-				name: "Check out the repo"
-				uses: "actions/checkout@v2"
-			}, {
-				name: "Set version environment"
-				run: """
-					CUE_VERSION=$(echo ${GITHUB_REF##refs/tags/v})
-					echo \"CUE_VERSION=$CUE_VERSION\"
-					echo \"CUE_VERSION=$(echo $CUE_VERSION)\" >> $GITHUB_ENV
-					"""
-			}, {
-				name: "Push to Docker Hub"
-				env: {
-					DOCKER_BUILDKIT: 1
-					GOLANG_VERSION:  1.14
-					CUE_VERSION:     "${{ env.CUE_VERSION }}"
-				}
-				uses: "docker/build-push-action@v1"
-				with: {
-					tags:           "${{ env.CUE_VERSION }},latest"
-					repository:     "cuelang/cue"
-					username:       "${{ secrets.DOCKER_USERNAME }}"
-					password:       "${{ secrets.DOCKER_PASSWORD }}"
-					tag_with_ref:   false
-					tag_with_sha:   false
-					target:         "cue"
-					always_pull:    true
-					build_args:     "GOLANG_VERSION=${{ env.GOLANG_VERSION }},CUE_VERSION=v${{ env.CUE_VERSION }}"
-					add_git_labels: true
-				}
-			}]
+			steps: [
+				_#checkoutCode,
+				_#step & {
+					name: "Set version environment"
+					run: """
+						CUE_VERSION=$(echo ${GITHUB_REF##refs/tags/v})
+						echo \"CUE_VERSION=$CUE_VERSION\"
+						echo \"CUE_VERSION=$(echo $CUE_VERSION)\" >> $GITHUB_ENV
+						"""
+				},
+				_#step & {
+					name: "Push to Docker Hub"
+					env: {
+						DOCKER_BUILDKIT: 1
+						GOLANG_VERSION:  1.14
+						CUE_VERSION:     "${{ env.CUE_VERSION }}"
+					}
+					uses: "docker/build-push-action@v1"
+					with: {
+						tags:           "${{ env.CUE_VERSION }},latest"
+						repository:     "cuelang/cue"
+						username:       "${{ secrets.DOCKER_USERNAME }}"
+						password:       "${{ secrets.DOCKER_PASSWORD }}"
+						tag_with_ref:   false
+						tag_with_sha:   false
+						target:         "cue"
+						always_pull:    true
+						build_args:     "GOLANG_VERSION=${{ env.GOLANG_VERSION }},CUE_VERSION=v${{ env.CUE_VERSION }}"
+						add_git_labels: true
+					}
+				},
+			]
 		}
 	}
 }
@@ -279,8 +334,10 @@ _#job:  ((json.#Workflow & {}).jobs & {x: _}).x
 _#step: ((_#job & {steps:                 _}).steps & [_])[0]
 
 // We need at least go1.14 for code generation
-_#codeGenGo:      "1.14.14"
-_#latestStableGo: "1.15.x"
+_#codeGenGo: "1.14.14"
+
+// Use a specific latest version for release builds
+_#latestStableGo: "1.15.8"
 
 _#linuxMachine:   "ubuntu-18.04"
 _#macosMachine:   "macos-10.15"
@@ -290,16 +347,24 @@ _#testStrategy: {
 	"fail-fast": false
 	matrix: {
 		// Use a stable version of 1.14.x for go generate
-		"go-version": [_#codeGenGo, _#latestStableGo, "1.16.0-rc1"]
+		"go-version": [_#codeGenGo, _#latestStableGo, "1.16"]
 		os: [_#linuxMachine, _#macosMachine, _#windowsMachine]
 	}
+}
+
+_#setGoBuildTags: _#step & {
+	_#tags: string
+	name:   "Set go build tags"
+	run:    """
+		go env -w GOFLAGS=-tags=\(_#tags)
+		"""
 }
 
 _#installGo: _#step & {
 	name: "Install Go"
 	uses: "actions/setup-go@v2"
 	with: {
-		"go-version": "${{ matrix.go-version }}"
+		"go-version": *"${{ matrix.go-version }}" | string
 		stable:       false
 	}
 }
@@ -364,3 +429,38 @@ _#tempCueckooGitDir: """
 	git config user.email cueckoo@gmail.com
 	git config http.https://github.com/.extraheader "AUTHORIZATION: basic $(echo -n cueckoo:${{ secrets.CUECKOO_GITHUB_PAT }} | base64)"
 	"""
+
+// The cueckoo/copybara Docker image to use
+_#cueckooCopybaraImage: "cueckoo/copybara:afc4ae03eed00b0c9d7415141cd1b5dfa583da7c"
+
+// Define the base command for copybara
+_#copybaraCmd: {
+	_#cmd: string
+	#"""
+		cd _scripts
+		docker run --rm -v $PWD/cache:/root/copybara/cache -v $PWD:/usr/src/app --entrypoint="" \#(_#cueckooCopybaraImage) bash -c " \
+			set -eu; \
+			echo \"${{ secrets.gerritCookie }}\" > ~/.gitcookies; \
+			chmod 600 ~/.gitcookies; \
+			git config --global user.name cueckoo; \
+			git config --global user.email cueckoo@gmail.com; \
+			git config --global http.cookiefile \$HOME/.gitcookies; \
+		  	echo https://cueckoo:${{ secrets.CUECKOO_GITHUB_PAT }}@github.com > ~/.git-credentials; \
+			chmod 600 ~/.git-credentials; \
+			java -jar /opt/copybara/copybara_deploy.jar migrate copy.bara.sky \#(_#cmd); \
+			"
+		"""#
+}
+
+_#copybaraSteps: {
+	_#name: string
+	_#cmd:  string
+	let cmdCmd = _#cmd
+	[
+		_#checkoutCode, // needed for copy.bara.sky file
+		_#step & {
+			name: _#name
+			run:  _#copybaraCmd & {_, _#cmd: cmdCmd}
+		},
+	]
+}

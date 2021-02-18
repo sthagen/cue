@@ -642,9 +642,6 @@ func TestList(t *testing.T) {
 		value: `[1,2,3]`,
 		res:   "[1,2,3,]",
 	}, {
-		value: `>=5*[1,2,3, ...int]`,
-		err:   "non-concrete value >=5 in operand to *",
-	}, {
 		value: `[for x in #y if x > 1 { x }]
 		#y: [1,2,3]`,
 		res: "[2,3,]",
@@ -979,6 +976,38 @@ func TestFill2(t *testing.T) {
 	if got != want {
 		t.Errorf("got:  %s\nwant: %s", got, want)
 	}
+}
+
+func TestFillFloat(t *testing.T) {
+	// This tests panics for issue #749
+
+	want := `{
+	x: 3.14
+}`
+
+	filltest := func(x interface{}) {
+		r := &Runtime{}
+		i, err := r.Compile("test", `
+	x: number
+	`)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		i, err = i.Fill(x, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		got := fmt.Sprint(i.Value())
+		if got != want {
+			t.Errorf("got:  %s\nwant: %s", got, want)
+		}
+	}
+
+	filltest(float32(3.14))
+	filltest(float64(3.14))
+	filltest(big.NewFloat(3.14))
 }
 
 func TestValue_LookupDef(t *testing.T) {
@@ -2325,9 +2354,6 @@ func TestMarshalJSON(t *testing.T) {
 	}, {
 		value: `[int]`,
 		err:   `0: cannot convert incomplete value`,
-	}, {
-		value: `(>=3 * [1, 2])`,
-		err:   "cue: marshal error: non-concrete value >=3 in operand to *",
 	}, {
 		value: `{}`,
 		json:  `{}`,

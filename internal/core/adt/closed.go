@@ -93,7 +93,8 @@ const (
 type CloseInfo struct {
 	*closeInfo
 
-	IsClosed bool
+	IsClosed   bool
+	FieldTypes OptionalType
 }
 
 func (c CloseInfo) Location() Node {
@@ -310,18 +311,30 @@ func Accept(ctx *OpContext, n *Vertex, f Feature) (found, required bool) {
 	ctx.generation++
 	ctx.todo = nil
 
+	var optionalTypes OptionalType
+
+	// TODO(perf): more aggressively determine whether a struct is open or
+	// closed: open structs do not have to be checked, yet they can particularly
+	// be the ones with performance isssues, for instanced as a result of
+	// embedded for comprehensions.
 	for _, s := range n.Structs {
 		if !s.useForAccept() {
 			continue
 		}
 		markCounts(ctx, s.CloseInfo)
+		optionalTypes |= s.types
+	}
+
+	var str Value
+	if optionalTypes&(HasComplexPattern|HasDynamic) != 0 && f.IsString() {
+		str = f.ToValue(ctx)
 	}
 
 	for _, s := range n.Structs {
 		if !s.useForAccept() {
 			continue
 		}
-		if verifyArc(ctx, s, f) {
+		if verifyArc(ctx, s, f, str) {
 			// Beware: don't add to below expression: this relies on the
 			// side effects of markUp.
 			ok := markUp(ctx, s.closeInfo, 0)
@@ -435,7 +448,7 @@ func getScratch(ctx *OpContext, s *closeInfo) *closeStats {
 	return x
 }
 
-func verifyArc(ctx *OpContext, s *StructInfo, f Feature) bool {
+func verifyArc(ctx *OpContext, s *StructInfo, f Feature, label Value) bool {
 	isRegular := f.IsRegular()
 
 	o := s.StructLit
@@ -455,15 +468,24 @@ func verifyArc(ctx *OpContext, s *StructInfo, f Feature) bool {
 		return false
 	}
 
-	for _, b := range o.Dynamic {
-		m := dynamicMatcher{b.Key}
-		if m.Match(ctx, env, f) {
-			return true
+	if len(o.Dynamic) > 0 && f.IsString() {
+		if label == nil && f.IsString() {
+			label = f.ToValue(ctx)
+		}
+		for _, b := range o.Dynamic {
+			v := env.evalCached(ctx, b.Key)
+			s, ok := v.(*String)
+			if !ok {
+				continue
+			}
+			if label.(*String).Str == s.Str {
+				return true
+			}
 		}
 	}
 
 	for _, b := range o.Bulk {
-		if matchBulk(ctx, env, b, f) {
+		if matchBulk(ctx, env, b, f, label) {
 			return true
 		}
 	}

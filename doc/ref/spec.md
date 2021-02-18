@@ -127,6 +127,7 @@ The underscore character _ (U+005F) is considered a letter.
 ```
 letter        = unicode_letter | "_" .
 decimal_digit = "0" … "9" .
+binary_digit  = "0" … "1" .
 octal_digit   = "0" … "7" .
 hex_digit     = "0" … "9" | "A" … "F" | "a" … "f" .
 ```
@@ -710,6 +711,10 @@ A _marked disjunction_ is one where any of its terms are marked.
 So `a | b | *c | d` is a single marked disjunction of four terms,
 whereas `a | (b | *c | d)` is an unmarked disjunction of two terms,
 one of which is a marked disjunction of three terms.
+During unification, if all the marked disjuncts of a marked disjunction are
+eliminated, then the remaining unmarked disjuncts are considered as if they
+originated from an unmarked disjunction
+<!-- TODO: this formulation should be worked out more.  -->
 As explained below, distinguishing the nesting of disjunctions like this
 is only relevant when both an outer and nested disjunction are marked.
 
@@ -832,6 +837,10 @@ Any evaluation error is represented as bottom.
 Implementations may associate error strings with different instances of bottom;
 logically they all remain the same value.
 
+```
+bottom_lit = "_|_" .
+```
+
 
 ### Top
 
@@ -854,7 +863,7 @@ It has only one parent, top, and one child, bottom.
 It is unordered with respect to any other value.
 
 ```
-null_lit   = "null"
+null_lit   = "null" .
 ```
 
 ```
@@ -872,7 +881,7 @@ The predeclared boolean type is `bool`; it is a defined type and a separate
 element in the lattice.
 
 ```
-boolean_lit = "true" | "false"
+bool_lit = "true" | "false" .
 ```
 
 ```
@@ -1618,7 +1627,7 @@ The length of an open list is the its number of elements as a lower bound
 and an unlimited number of elements as its upper bound.
 
 ```
-ListLit       = "[" [ ElementList [ "," [ Ellipsis ] ] [ "," ] "]" .
+ListLit       = "[" [ ElementList [ "," [ Ellipsis ] ] [ "," ] ] "]" .
 ElementList   = Embedding { "," Embedding } .
 ```
 
@@ -1848,7 +1857,7 @@ field, alias, or let declaration, or a parenthesized expression.
 Operand     = Literal | OperandName | "(" Expression ")" .
 Literal     = BasicLit | ListLit | StructLit .
 BasicLit    = int_lit | float_lit | string_lit |
-              null_lit | bool_lit | bottom_lit | top_lit .
+              null_lit | bool_lit | bottom_lit .
 OperandName = identifier | QualifiedIdent .
 ```
 

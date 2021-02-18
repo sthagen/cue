@@ -27,20 +27,20 @@ import (
 	"cuelang.org/go/internal/core/debug"
 	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/core/validate"
+	"cuelang.org/go/internal/cuetest"
 	"cuelang.org/go/internal/cuetxtar"
 	_ "cuelang.org/go/pkg"
 )
 
 var (
-	update = flag.Bool("update", false, "update the test files")
-	todo   = flag.Bool("todo", false, "run tests marked with #todo-compile")
+	todo = flag.Bool("todo", false, "run tests marked with #todo-compile")
 )
 
 func TestEval(t *testing.T) {
 	test := cuetxtar.TxTarTest{
 		Root:   "../../../cue/testdata",
 		Name:   "eval",
-		Update: *update,
+		Update: cuetest.UpdateGoldenFiles,
 		Skip:   alwaysSkip,
 		ToDo:   needFix,
 	}
@@ -66,9 +66,9 @@ func TestEval(t *testing.T) {
 
 		stats := ctx.Stats()
 		t.Log(stats)
-		if n := stats.Leaks(); n > 0 {
-			t.Skipf("%d leaks reported", n)
-		}
+		// if n := stats.Leaks(); n > 0 {
+		// 	t.Skipf("%d leaks reported", n)
+		// }
 
 		if b := validate.Validate(ctx, v, &validate.Config{
 			AllErrors: true,

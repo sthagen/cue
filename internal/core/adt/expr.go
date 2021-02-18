@@ -117,10 +117,16 @@ func (o *StructLit) Init() {
 			o.HasEmbed = true
 
 		case *ForClause, Yielder:
+			o.HasEmbed = true
 
 		case *BulkOptionalField:
 			o.Bulk = append(o.Bulk, x)
 			o.types |= HasPattern
+			switch x.Filter.(type) {
+			case *BasicType, *Top:
+			default:
+				o.types |= HasComplexPattern
+			}
 
 		case *Ellipsis:
 			expr := x.Value
@@ -558,6 +564,7 @@ func (x *BoundExpr) evaluate(ctx *OpContext) Value {
 		}
 	}
 	if v.Concreteness() > Concrete {
+		// TODO(errors): analyze dependencies of x.Expr to get positions.
 		ctx.addErrf(IncompleteError, ctx.pos(),
 			"non-concrete value %s for bound %s", ctx.Str(x.Expr), x.Op)
 		return nil
@@ -609,12 +616,64 @@ func (x *BoundValue) validate(c *OpContext, y Value) *Bottom {
 		}
 		// TODO(errors): use "invalid value %v (not an %s)" if x is a
 		// predeclared identifier such as `int`.
-		return c.NewErrf("invalid value %v (out of bound %s)",
+		err := c.Newf("invalid value %v (out of bound %s)",
 			c.Str(y), c.Str(x))
+		err.AddPosition(y)
+		return &Bottom{Src: c.src, Err: err, Code: EvalError}
 
 	default:
 		panic(fmt.Sprintf("unsupported type %T", v))
 	}
+}
+
+func (x *BoundValue) validateStr(c *OpContext, a string) bool {
+	if str, ok := x.Value.(*String); ok {
+		b := str.Str
+		switch x.Op {
+		case LessEqualOp:
+			return a <= b
+		case LessThanOp:
+			return a < b
+		case GreaterEqualOp:
+			return a >= b
+		case GreaterThanOp:
+			return a > b
+		case EqualOp:
+			return a == b
+		case NotEqualOp:
+			return a != b
+		case MatchOp:
+			return c.regexp(x.Value).MatchString(a)
+		case NotMatchOp:
+			return !c.regexp(x.Value).MatchString(a)
+		}
+	}
+	return x.validate(c, &String{Str: a}) == nil
+}
+
+func (x *BoundValue) validateInt(c *OpContext, a int64) bool {
+	switch n := x.Value.(type) {
+	case *Num:
+		b, err := n.X.Int64()
+		if err != nil {
+			break
+		}
+		switch x.Op {
+		case LessEqualOp:
+			return a <= b
+		case LessThanOp:
+			return a < b
+		case GreaterEqualOp:
+			return a >= b
+		case GreaterThanOp:
+			return a > b
+		case EqualOp:
+			return a == b
+		case NotEqualOp:
+			return a != b
+		}
+	}
+	return x.validate(c, c.NewInt64(a)) == nil
 }
 
 // A NodeLink is used during computation to refer to an existing Vertex.
@@ -895,10 +954,10 @@ func (x *SliceExpr) evaluate(c *OpContext) Value {
 				c.AddBottom(&Bottom{Src: a.Source(), Err: err})
 				return nil
 			}
-			n.Arcs = append(n.Arcs, &Vertex{
-				Label:     label,
-				Conjuncts: a.Conjuncts,
-			})
+			arc := *a
+			arc.Parent = n
+			arc.Label = label
+			n.Arcs = append(n.Arcs, &arc)
 		}
 		n.status = Finalized
 		return n

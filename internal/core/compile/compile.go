@@ -205,7 +205,7 @@ func (c compiler) lookupAlias(k int, id *ast.Ident) aliasEntry {
 		entry.srcExpr = nil // mark to allow detecting cycles
 		m[name] = entry
 
-		entry.expr = c.labeledExpr(nil, entry.label, src)
+		entry.expr = c.labeledExprAt(k, nil, entry.label, src)
 		entry.label = nil
 	}
 
@@ -753,6 +753,10 @@ func (c *compiler) embed(expr ast.Expr) adt.Expr {
 
 func (c *compiler) labeledExpr(f *ast.Field, lab labeler, expr ast.Expr) adt.Expr {
 	k := len(c.stack) - 1
+	return c.labeledExprAt(k, f, lab, expr)
+}
+
+func (c *compiler) labeledExprAt(k int, f *ast.Field, lab labeler, expr ast.Expr) adt.Expr {
 	if c.stack[k].field != nil {
 		panic("expected nil field")
 	}
@@ -927,18 +931,28 @@ func (c *compiler) expr(expr ast.Expr) adt.Expr {
 			return d
 
 		default:
+			op := adt.OpFromToken(n.Op)
+			x := c.expr(n.X)
+			y := c.expr(n.Y)
+			if op != adt.AndOp {
+				c.assertConcreteIsPossible(n.X, op, x)
+				c.assertConcreteIsPossible(n.Y, op, y)
+			}
 			// return updateBin(c,
-			return &adt.BinaryExpr{
-				Src: n,
-				Op:  adt.OpFromToken(n.Op), // op
-				X:   c.expr(n.X),           // left
-				Y:   c.expr(n.Y),           // right
-			} // )
+			return &adt.BinaryExpr{Src: n, Op: op, X: x, Y: y} // )
 		}
 
 	default:
 		return c.errf(n, "%s values not allowed in this position", ast.Name(n))
 	}
+}
+
+func (c *compiler) assertConcreteIsPossible(src ast.Node, op adt.Op, x adt.Expr) bool {
+	if !adt.AssertConcreteIsPossible(op, x) {
+		str := internal.DebugStr(src)
+		c.errf(src, "invalid operand %s ('%s' requires concrete value)", str, op)
+	}
+	return false
 }
 
 func (c *compiler) addDisjunctionElem(d *adt.DisjunctionExpr, n ast.Expr, mark bool) {

@@ -1831,7 +1831,7 @@ func (v Value) Equals(other Value) bool {
 	if v.v == nil || other.v == nil {
 		return false
 	}
-	return adt.Equal(v.ctx().opCtx, v.v, other.v)
+	return adt.Equal(v.ctx().opCtx, v.v, other.v, adt.CheckStructural)
 }
 
 // Format prints a debug version of a value.
@@ -1857,7 +1857,7 @@ func (v Value) instance() *Instance {
 	if v.v == nil {
 		return nil
 	}
-	return v.ctx().getImportFromNode(v.v)
+	return v.idx.getImportFromNode(v.v)
 }
 
 // Reference returns the instance and path referred to by this value such that

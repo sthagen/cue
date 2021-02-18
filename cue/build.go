@@ -31,7 +31,6 @@ import (
 //
 // The zero value of a Runtime is ready to use.
 type Runtime struct {
-	ctx *build.Context // TODO: remove
 	idx *index
 }
 
@@ -75,14 +74,6 @@ func (r *Runtime) index() *index {
 	return r.idx
 }
 
-func (r *Runtime) buildContext() *build.Context {
-	ctx := r.ctx
-	if r.ctx == nil {
-		ctx = build.NewContext()
-	}
-	return ctx
-}
-
 func (r *Runtime) complete(p *build.Instance) (*Instance, error) {
 	idx := r.index()
 	if err := p.Complete(); err != nil {
@@ -101,7 +92,7 @@ func (r *Runtime) complete(p *build.Instance) (*Instance, error) {
 // name in position information. The source may import builtin packages. Use
 // Build to allow importing non-builtin packages.
 func (r *Runtime) Compile(filename string, source interface{}) (*Instance, error) {
-	ctx := r.buildContext()
+	ctx := build.NewContext()
 	p := ctx.NewInstance(filename, dummyLoad)
 	if err := p.AddFile(filename, source); err != nil {
 		return nil, p.Err
@@ -112,7 +103,7 @@ func (r *Runtime) Compile(filename string, source interface{}) (*Instance, error
 // CompileFile compiles the given source file into an Instance. The source may
 // import builtin packages. Use Build to allow importing non-builtin packages.
 func (r *Runtime) CompileFile(file *ast.File) (*Instance, error) {
-	ctx := r.buildContext()
+	ctx := build.NewContext()
 	p := ctx.NewInstance(file.Filename, dummyLoad)
 	err := p.AddSyntax(file)
 	if err != nil {
@@ -193,25 +184,19 @@ func (r *Runtime) FromExpr(expr ast.Expr) (*Instance, error) {
 	})
 }
 
-type importIndex map[*build.Instance]*Instance
-
 // index maps conversions from label names to internal codes.
 //
 // All instances belonging to the same package should share this index.
 type index struct {
 	*runtime.Runtime
-	loaded importIndex
+	loaded map[*build.Instance]*Instance
 }
 
 // NewRuntime creates a *runtime.Runtime with builtins preloaded.
 func NewRuntime() *runtime.Runtime {
-	r := runtime.New()
-	i := &index{
-		Runtime: r,
-		loaded:  importIndex{},
-	}
-	r.Data = i
-	return r
+	i := newIndex()
+	i.Runtime.Data = i
+	return i.Runtime
 }
 
 // newIndex creates a new index.
@@ -219,7 +204,7 @@ func newIndex() *index {
 	r := runtime.New()
 	i := &index{
 		Runtime: r,
-		loaded:  importIndex{},
+		loaded:  map[*build.Instance]*Instance{},
 	}
 	r.Data = i
 	return i
@@ -230,6 +215,6 @@ func isBuiltin(s string) bool {
 }
 
 func (idx *index) loadInstance(p *build.Instance) *Instance {
-	idx.Runtime.Build(p)
-	return idx.getImportFromBuild(p)
+	v, _ := idx.Runtime.Build(p)
+	return idx.getImportFromBuild(p, v)
 }

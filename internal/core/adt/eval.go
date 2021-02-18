@@ -184,6 +184,7 @@ func (c *OpContext) Unify(v *Vertex, state VertexStatus) {
 		return
 
 	case EvaluatingArcs:
+		Assertf(v.status > 0, "unexpected status %d", v.status)
 		return
 
 	case 0:
@@ -305,7 +306,7 @@ func (c *OpContext) Unify(v *Vertex, state VertexStatus) {
 		if len(n.disjunctions) > 0 && disState != Finalized {
 			disState = Finalized
 		}
-		n.expandDisjuncts(disState, n, maybeDefault, false)
+		n.expandDisjuncts(disState, n, maybeDefault, false, true)
 
 		n.finalizeDisjuncts()
 
@@ -353,6 +354,10 @@ func (c *OpContext) Unify(v *Vertex, state VertexStatus) {
 		// completing all disjunctions.
 		if !n.done() {
 			if err := n.incompleteErrors(); err != nil {
+				b, _ := n.node.BaseValue.(*Bottom)
+				if b != err {
+					err = CombineErrors(n.ctx.src, b, err)
+				}
 				n.node.BaseValue = err
 			}
 		}
@@ -380,9 +385,16 @@ func (c *OpContext) Unify(v *Vertex, state VertexStatus) {
 // insertConjuncts inserts conjuncts previously uninserted.
 func (n *nodeContext) insertConjuncts() {
 	for len(n.conjuncts) > 0 {
-		x := n.conjuncts[0]
+		nInfos := len(n.node.Structs)
+		p := &n.conjuncts[0]
 		n.conjuncts = n.conjuncts[1:]
-		n.addExprConjunct(x)
+		n.addExprConjunct(*p)
+
+		// Record the OptionalTypes for all structs that were inferred by this
+		// Conjunct. This information can be used by algorithms such as trim.
+		for i := nInfos; i < len(n.node.Structs); i++ {
+			p.CloseInfo.FieldTypes |= n.node.Structs[i].types
+		}
 	}
 }
 
@@ -774,10 +786,28 @@ type nodeContext struct {
 
 	// Disjunction handling
 	disjunctions []envDisjunct
+
+	// usedDefault indicates the for each of possibly multiple parent
+	// disjunctions whether it is unified with a default disjunct or not.
+	// This is then later used to determine whether a disjunction should
+	// be treated as a marked disjunction.
+	usedDefault []defaultInfo
+
 	defaultMode  defaultMode
 	disjuncts    []*nodeContext
 	buffer       []*nodeContext
 	disjunctErrs []*Bottom
+}
+
+type defaultInfo struct {
+	// parentMode indicates whether this values was used as a default value,
+	// based on the parent mode.
+	parentMode defaultMode
+
+	// The result of default evaluation for a nested disjunction.
+	nestedMode defaultMode
+
+	origMode defaultMode
 }
 
 func (n *nodeContext) addNotify(v *Vertex) {
@@ -820,6 +850,8 @@ func (n *nodeContext) clone() *nodeContext {
 	d.lists = append(d.lists, n.lists...)
 	d.vLists = append(d.vLists, n.vLists...)
 	d.exprs = append(d.exprs, n.exprs...)
+	d.usedDefault = append(d.usedDefault, n.usedDefault...)
+
 	// No need to clone d.disjunctions
 
 	return d
@@ -845,6 +877,7 @@ func (c *OpContext) newNodeContext(node *Vertex) *nodeContext {
 			vLists:        n.vLists[:0],
 			exprs:         n.exprs[:0],
 			disjunctions:  n.disjunctions[:0],
+			usedDefault:   n.usedDefault[:0],
 			disjunctErrs:  n.disjunctErrs[:0],
 			disjuncts:     n.disjuncts[:0],
 			buffer:        n.buffer[:0],
@@ -1049,11 +1082,6 @@ func (n *nodeContext) getValidators() BaseValue {
 		// Src is the combined input.
 		v = &BasicType{K: n.kind}
 
-		if len(n.node.Structs) > 0 {
-			v = structSentinel
-
-		}
-
 	case 1:
 		v = a[0].(Value) // remove cast
 
@@ -1070,7 +1098,7 @@ func (n *nodeContext) maybeSetCache() {
 		return
 	}
 	if n.scalar != nil {
-		n.node.SetValue(n.ctx, Partial, n.scalar)
+		n.node.BaseValue = n.scalar
 	}
 	// NOTE: this is now handled by associating the nodeContext
 	// if n.errs != nil {
@@ -1320,6 +1348,16 @@ func (n *nodeContext) addVertexConjuncts(env *Environment, closeInfo CloseInfo, 
 	}
 
 	closeInfo = closeInfo.SpawnRef(arc, IsDef(x), x)
+
+	if arc.status == 0 && !inline {
+		// This is a rare condition, but can happen in certain
+		// evaluation orders. Unfortunately, adding this breaks
+		// resolution of cyclic mutually referring disjunctions. But it
+		// is necessary to prevent lookups in unevaluated structs.
+		// TODO(cycles): this can probably most easily be fixed with a
+		// having a more recursive implementation.
+		n.ctx.Unify(arc, AllArcs)
+	}
 
 	for _, c := range arc.Conjuncts {
 		var a []*Vertex
