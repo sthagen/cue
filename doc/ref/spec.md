@@ -431,13 +431,13 @@ All other sequences starting with a backslash are illegal inside literals.
 ```
 escaped_char     = `\` { `#` } ( "a" | "b" | "f" | "n" | "r" | "t" | "v" | "/" | `\` | "'" | `"` ) .
 byte_value       = octal_byte_value | hex_byte_value .
-octal_byte_value = `\` octal_digit octal_digit octal_digit .
-hex_byte_value   = `\` "x" hex_digit hex_digit .
-little_u_value   = `\` "u" hex_digit hex_digit hex_digit hex_digit .
-big_u_value      = `\` "U" hex_digit hex_digit hex_digit hex_digit
+octal_byte_value = `\` { `#` } octal_digit octal_digit octal_digit .
+hex_byte_value   = `\` { `#` } "x" hex_digit hex_digit .
+little_u_value   = `\` { `#` } "u" hex_digit hex_digit hex_digit hex_digit .
+big_u_value      = `\` { `#` } "U" hex_digit hex_digit hex_digit hex_digit
                            hex_digit hex_digit hex_digit hex_digit .
 unicode_value    = unicode_char | little_u_value | big_u_value | escaped_char .
-interpolation    = "\(" Expression ")" .
+interpolation    = "\" { `#` } "(" Expression ")" .
 
 string_lit       = simple_string_lit |
                    multiline_string_lit |
@@ -469,7 +469,7 @@ the string value.
 "Hello, \( name )!"
 "日本語"
 "\u65e5本\U00008a9e"
-"\xff\u00FF"
+'\xff\u00FF'
 "\uD800"             // illegal: surrogate half (TODO: probably should allow)
 "\U00110000"         // illegal: invalid Unicode code point
 
@@ -486,7 +486,7 @@ These examples all represent the same string:
 `日本語`                                 // UTF-8 input text as a raw literal
 "\u65e5\u672c\u8a9e"                    // the explicit Unicode code points
 "\U000065e5\U0000672c\U00008a9e"        // the explicit Unicode code points
-"\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e"  // the explicit UTF-8 bytes
+'\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e'  // the explicit UTF-8 bytes
 ```
 
 If the source code represents a character as two code points, such as a
