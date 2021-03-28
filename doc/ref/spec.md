@@ -1103,21 +1103,6 @@ b: a & {
 }
 ```
 
-<!-- NOTE: pattern and default constraints can be made to apply to all
-fields by embedding them as a struct:
-    x: {
-        a: 2
-        b: 3
-        {[string]: int}
-    }
-or by writing
-    x: [string]: int
-    x: {
-        a: 2
-        b: 3
-    }
--->
-
 Concrete field labels may be an identifier or string, the latter of which may be
 interpolated.
 Fields with identifier labels can be referred to within the scope they are
@@ -1369,7 +1354,7 @@ Referencing a definition will recursively [close](#ClosedStructs) it.
 That is, a referenced definition will not unify with a struct
 that would add a field anywhere within the definition that it does not
 already define or explicitly allow with a pattern constraint or `...`.
-[Embeddings](#Embedding) allow bypassing this check.
+[Embeddings](#embedding) allow bypassing this check.
 
 If referencing a definition would always result in an error, implementations
 may report this inconsistency at the point of its declaration.
@@ -1627,8 +1612,8 @@ The length of an open list is the its number of elements as a lower bound
 and an unlimited number of elements as its upper bound.
 
 ```
-ListLit       = "[" [ ElementList [ "," [ Ellipsis ] ] [ "," ] ] "]" .
-ElementList   = Embedding { "," Embedding } .
+ListLit       = "[" [ ElementList [ "," ] ] "]" .
+ElementList   = Ellipsis | Embedding { "," Embedding } [ "," Ellipsis ] .
 ```
 
 Lists can be thought of as structs:
