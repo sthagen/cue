@@ -28,6 +28,7 @@ import (
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/core/adt"
 )
 
 type buildContext struct {
@@ -439,6 +440,21 @@ func (b *builder) value(v cue.Value, f typeFunc) (isRef bool) {
 
 func appendSplit(a []cue.Value, splitBy cue.Op, v cue.Value) []cue.Value {
 	op, args := v.Expr()
+	// dedup elements.
+	k := 1
+outer:
+	for i := 1; i < len(args); i++ {
+		for j := 0; j < k; j++ {
+			if args[i].Subsume(args[j], cue.Raw()) == nil &&
+				args[j].Subsume(args[i], cue.Raw()) == nil {
+				continue outer
+			}
+		}
+		args[k] = args[i]
+		k++
+	}
+	args = args[:k]
+
 	if op == cue.NoOp && len(args) == 1 {
 		// TODO: this is to deal with default value removal. This may change
 		// whe we completely separate default values from values.
@@ -591,7 +607,8 @@ func (b *builder) setValueType(v cue.Value) {
 		return
 	}
 
-	switch v.IncompleteKind() {
+	k := v.IncompleteKind() &^ adt.NullKind
+	switch k {
 	case cue.BoolKind:
 		b.typ = "boolean"
 	case cue.FloatKind, cue.NumberKind:

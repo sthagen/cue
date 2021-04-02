@@ -978,6 +978,113 @@ func TestFill2(t *testing.T) {
 	}
 }
 
+func TestFillPath(t *testing.T) {
+	r := &Runtime{}
+
+	inst, err := r.CompileExpr(ast.NewStruct("bar", ast.NewString("baz")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []struct {
+		in   string
+		x    interface{}
+		path Path
+		out  string
+	}{{
+		in: `
+		foo: int
+		bar: foo
+		`,
+		x:    3,
+		path: ParsePath("foo"),
+		out: `
+		foo: 3
+		bar: 3
+		`,
+	}, {
+		in: `
+		X="#foo": int
+		bar: X
+		`,
+		x:    3,
+		path: ParsePath(`"#foo"`),
+		out: `
+		"#foo": 3
+		bar: 3
+		`,
+	}, {
+		in: `
+		X="#foo": foo: int
+		bar: X.foo
+		`,
+		x:    3,
+		path: ParsePath(`"#foo".foo`),
+		out: `
+		"#foo": foo: 3
+		bar: 3
+		`,
+	}, {
+		in: `
+		foo: #foo: int
+		bar: foo.#foo
+		`,
+		x:    3,
+		path: ParsePath("foo.#foo"),
+		out: `
+		foo: {
+			#foo: 3
+		}
+		bar: 3
+		`,
+	}, {
+		in: `
+		foo: _foo: int
+		bar: foo._foo
+		`,
+		x:    3,
+		path: MakePath(Str("foo"), Hid("_foo", "_")),
+		out: `
+		foo: {
+			_foo: 3
+		}
+		bar: 3
+		`,
+	}, {
+		in: `
+		string
+		`,
+		x:    "foo",
+		path: ParsePath(""),
+		out: `
+		"foo"
+		`,
+	}, {
+		in: `
+		foo: _
+		`,
+		x:    inst.Value(),
+		path: ParsePath("foo"),
+		out: `
+		{foo: {bar: "baz"}}
+		`,
+	}}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			v := compileT(t, r, tc.in).Value()
+			v = v.FillPath(tc.path, tc.x)
+
+			w := compileT(t, r, tc.out).Value()
+
+			if !cmp.Equal(goValue(v), goValue(w)) {
+				t.Error(cmp.Diff(goValue(v), goValue(w)))
+				t.Errorf("\ngot:  %s\nwant: %s", v, w)
+			}
+		})
+	}
+}
+
 func TestFillFloat(t *testing.T) {
 	// This tests panics for issue #749
 
@@ -1327,6 +1434,42 @@ func TestSubsume(t *testing.T) {
 		pathA:   ParsePath("#Run"),
 		pathB:   b,
 		options: []Option{Final()},
+		want:    true,
+	}, {
+		// default
+		value: `
+		a: <5
+		b: *3 | int
+		`,
+		pathA: a,
+		pathB: b,
+		want:  true,
+	}, {
+		// Disable default elimination.
+		value: `
+			a: <5
+			b: *3 | int
+			`,
+		pathA:   a,
+		pathB:   b,
+		options: []Option{Raw()},
+		want:    false,
+	}, {
+		value: `
+			#A: {
+				exact: string
+			} | {
+				regex: string
+			}
+			#B: {
+				exact: string
+			} | {
+				regex: string
+			}
+			`,
+		pathA:   ParsePath("#A"),
+		pathB:   ParsePath("#B"),
+		options: []Option{},
 		want:    true,
 	}}
 	for _, tc := range testCases {
@@ -1887,6 +2030,57 @@ func cmpError(a, b error) bool {
 	return a.Error() == b.Error()
 }
 
+func TestAttributes(t *testing.T) {
+	const config = `
+	a: {
+		a: 0 @foo(a,b,c=1)
+		b: 1 @bar(a,b,c,d=1) @foo(a,,d=1)
+	}
+	b: {
+		@embed(foo)
+		3
+	} @field(foo)
+
+	`
+
+	testCases := []struct {
+		flags AttrKind
+		path  string
+		out   string
+	}{{
+		flags: FieldAttr,
+		path:  "a.a",
+		out:   "[@foo(a,b,c=1)]",
+	}, {
+		flags: FieldAttr,
+		path:  "a.b",
+		out:   "[@bar(a,b,c,d=1) @foo(a,,d=1)]",
+	}, {
+		flags: DeclAttr,
+		path:  "b",
+		out:   "[@embed(foo)]",
+	}, {
+		flags: FieldAttr,
+		path:  "b",
+		out:   "[@field(foo)]",
+	}, {
+		flags: ValueAttr,
+		path:  "b",
+		out:   "[@field(foo) @embed(foo)]",
+	}}
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			v := getInstance(t, config).Value().LookupPath(ParsePath(tc.path))
+			a := v.Attributes(tc.flags)
+			got := fmt.Sprint(a)
+			if got != tc.out {
+				t.Errorf("got %v; want %v", got, tc.out)
+			}
+
+		})
+	}
+}
+
 func TestAttributeErr(t *testing.T) {
 	const config = `
 	a: {
@@ -2094,7 +2288,7 @@ func TestAttributeLookup(t *testing.T) {
 	const config = `
 	a: {
 		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,e=-5,d=1) @foo(a,,d=1)
+		b: 1 @bar(a,b,e =-5,d=1) @foo(a,,d=1)
 	}
 	`
 	testCases := []struct {

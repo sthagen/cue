@@ -1633,20 +1633,49 @@ func (v Value) LookupField(name string) (FieldInfo, error) {
 //
 // Any reference in v referring to the value at the given path will resolve
 // to x in the newly created value. The resulting value is not validated.
+//
+// Deprecated: use FillPath.
 func (v Value) Fill(x interface{}, path ...string) Value {
 	if v.v == nil {
 		return v
 	}
+	selectors := make([]Selector, len(path))
+	for i, p := range path {
+		selectors[i] = Str(p)
+	}
+	return v.FillPath(MakePath(selectors...), x)
+}
+
+// FillPath creates a new value by unifying v with the value of x at the given
+// path.
+//
+// Values may be any Go value that can be converted to CUE, an ast.Expr or a
+// Value. In the latter case, it will panic if the Value is not from the same
+// Runtime.
+//
+// Any reference in v referring to the value at the given path will resolve to x
+// in the newly created value. The resulting value is not validated.
+//
+// List paths are not supported at this time.
+func (v Value) FillPath(p Path, x interface{}) Value {
+	if v.v == nil {
+		return v
+	}
 	ctx := v.ctx()
-	for i := len(path) - 1; i >= 0; i-- {
-		x = map[string]interface{}{path[i]: x}
+	if err := p.Err(); err != nil {
+		return newErrValue(v, ctx.mkErr(nil, 0, "invalid path: %v", err))
 	}
-	var value = convert.GoValueToValue(ctx.opCtx, x, true)
-	n, _ := value.(*adt.Vertex)
-	if n == nil {
-		n = &adt.Vertex{}
-		n.AddConjunct(adt.MakeRootConjunct(nil, value))
+	var expr adt.Expr = convert.GoValueToValue(ctx.opCtx, x, true)
+	for i := len(p.path) - 1; i >= 0; i-- {
+		expr = &adt.StructLit{Decls: []adt.Decl{
+			&adt.Field{
+				Label: p.path[i].sel.feature(v.idx),
+				Value: expr,
+			},
+		}}
 	}
+	n := &adt.Vertex{}
+	n.AddConjunct(adt.MakeRootConjunct(nil, expr))
 	n.Finalize(ctx.opCtx)
 	w := makeValue(v.idx, n)
 	return v.Unify(w)
@@ -1687,15 +1716,15 @@ func (v Value) Template() func(label string) Value {
 //
 // Without options, the entire value is considered for assumption, which means
 // Subsume tests whether  v is a backwards compatible (newer) API version of w.
-// Use the Final() to indicate that the subsumed value is data, and that
 //
-// Use the Final option to check subsumption if a w is known to be final,
-// and should assumed to be closed.
+// Use the Final option to check subsumption if a w is known to be final, and
+// should assumed to be closed.
 //
-// Options are currently ignored and the function will panic if any are passed.
+// Use the Raw option to do a low-level subsumption, taking defaults into
+// account.
 //
-// Value v and w must be obtained from the same build.
-// TODO: remove this requirement.
+// Value v and w must be obtained from the same build. TODO: remove this
+// requirement.
 func (v Value) Subsume(w Value, opts ...Option) error {
 	o := getOptions(opts)
 	p := subsume.CUE
@@ -1707,7 +1736,9 @@ func (v Value) Subsume(w Value, opts ...Option) error {
 	case o.ignoreClosedness:
 		p = subsume.API
 	}
-	p.Defaults = true
+	if !o.raw {
+		p.Defaults = true
+	}
 	ctx := v.ctx().opCtx
 	return p.Value(ctx, v.v, w.v)
 }
@@ -2137,23 +2168,133 @@ func (v Value) Walk(before func(Value) bool, after func(Value)) {
 func (v Value) Attribute(key string) Attribute {
 	// look up the attributes
 	if v.v == nil {
-		return Attribute{internal.NewNonExisting(key)}
+		return nonExistAttr(key)
 	}
 	// look up the attributes
 	for _, a := range export.ExtractFieldAttrs(v.v.Conjuncts) {
-		k, body := a.Split()
+		k, _ := a.Split()
 		if key != k {
 			continue
 		}
-		return Attribute{internal.ParseAttrBody(token.NoPos, body)}
+		return newAttr(internal.FieldAttr, a)
 	}
 
-	return Attribute{internal.NewNonExisting(key)}
+	return nonExistAttr(key)
 }
+
+func newAttr(k internal.AttrKind, a *ast.Attribute) Attribute {
+	key, body := a.Split()
+	x := internal.ParseAttrBody(token.NoPos, body)
+	x.Name = key
+	x.Kind = k
+	return Attribute{x}
+}
+
+func nonExistAttr(key string) Attribute {
+	a := internal.NewNonExisting(key)
+	a.Name = key
+	a.Kind = internal.FieldAttr
+	return Attribute{a}
+}
+
+// Attributes reports all field attributes for the Value.
+//
+// To retrieve attributes of multiple kinds, you can bitwise-or kinds together.
+// Use ValueKind to query attributes associated with a value.
+func (v Value) Attributes(mask AttrKind) []Attribute {
+	if v.v == nil {
+		return nil
+	}
+
+	attrs := []Attribute{}
+
+	if mask&FieldAttr != 0 {
+		for _, a := range export.ExtractFieldAttrs(v.v.Conjuncts) {
+			attrs = append(attrs, newAttr(internal.FieldAttr, a))
+		}
+	}
+
+	if mask&DeclAttr != 0 {
+		for _, a := range export.ExtractDeclAttrs(v.v.Conjuncts) {
+			attrs = append(attrs, newAttr(internal.DeclAttr, a))
+		}
+	}
+
+	return attrs
+}
+
+// AttrKind indicates the location of an attribute within CUE source.
+type AttrKind int
+
+const (
+	// FieldAttr indicates a field attribute.
+	// foo: bar @attr()
+	FieldAttr AttrKind = AttrKind(internal.FieldAttr)
+
+	// DeclAttr indicates a declaration attribute.
+	// foo: {
+	//     @attr()
+	// }
+	DeclAttr AttrKind = AttrKind(internal.DeclAttr)
+
+	// A ValueAttr is a bit mask to request any attribute that is locally
+	// associated with a field, instead of, for instance, an entire file.
+	ValueAttr AttrKind = FieldAttr | DeclAttr
+
+	// TODO: Possible future attr kinds
+	// ElemAttr (is a ValueAttr)
+	// FileAttr (not a ValueAttr)
+
+	// TODO: Merge: merge namesake attributes.
+)
 
 // An Attribute contains meta data about a field.
 type Attribute struct {
 	attr internal.Attr
+}
+
+// Format implements fmt.Formatter.
+func (a Attribute) Format(w fmt.State, verb rune) {
+	fmt.Fprintf(w, "@%s(%s)", a.attr.Name, a.attr.Body)
+}
+
+var _ fmt.Formatter = &Attribute{}
+
+// Name returns the name of the attribute, for instance, "json" for @json(...).
+func (a *Attribute) Name() string {
+	return a.attr.Name
+}
+
+// Contents reports the full contents of an attribute within parentheses, so
+// contents in @attr(contents).
+func (a *Attribute) Contents() string {
+	return a.attr.Body
+}
+
+// NumArgs reports the number of arguments parsed for this attribute.
+func (a *Attribute) NumArgs() int {
+	return len(a.attr.Fields)
+}
+
+// Arg reports the contents of the ith comma-separated argument of a.
+//
+// If the argument contains an unescaped equals sign, it returns a key-value
+// pair. Otherwise it returns the contents in value.
+func (a *Attribute) Arg(i int) (key, value string) {
+	f := a.attr.Fields[i]
+	return f.Key(), f.Value()
+}
+
+// RawArg reports the raw contents of the ith comma-separated argument of a,
+// including surrounding spaces.
+func (a *Attribute) RawArg(i int) string {
+	return a.attr.Fields[i].Text()
+}
+
+// Kind reports the type of location within CUE source where the attribute
+// was specified.
+func (a *Attribute) Kind() AttrKind {
+	return AttrKind(a.attr.Kind)
 }
 
 // Err returns the error associated with this Attribute or nil if this
