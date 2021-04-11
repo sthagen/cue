@@ -30,8 +30,6 @@ type Config struct {
 	// Scope specifies a node in which to look up unresolved references. This
 	// is useful for evaluating expressions within an already evaluated
 	// configuration.
-	//
-	// TODO
 	Scope *adt.Vertex
 
 	// Imports allows unresolved identifiers to resolve to imports.
@@ -237,9 +235,18 @@ func (c *compiler) popScope() {
 func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 	c.fileScope = map[adt.Feature]bool{}
 
-	// Populate file scope to handle unresolved references. Note that we do
-	// not allow aliases to be resolved across file boundaries.
+	// TODO(resolve): this is also done in the runtime package, do we need both?
+
+	// Populate file scope to handle unresolved references.
+	// Excluded from cross-file resolution are:
+	// - import specs
+	// - aliases
+	// - anything in an anonymous file
+	//
 	for _, f := range a {
+		if p := internal.GetPackageInfo(f); p.IsAnonymous() {
+			continue
+		}
 		for _, d := range f.Decls {
 			if f, ok := d.(*ast.Field); ok {
 				if id, ok := f.Label.(*ast.Ident); ok {
@@ -247,21 +254,6 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 				}
 			}
 		}
-	}
-
-	// TODO: Assume that the other context is unified with the newly compiled
-	// files. This is not the same behavior as the old functionality, but we
-	// wanted to nix this anyway. For instance by allowing pkg_tool to be
-	// treated differently.
-	if v := c.Config.Scope; v != nil {
-		for _, arc := range v.Arcs {
-			if _, ok := c.fileScope[arc.Label]; !ok {
-				c.fileScope[arc.Label] = true
-			}
-		}
-
-		c.pushScope(nil, 0, v.Source()) // File scope
-		defer c.popScope()
 	}
 
 	// TODO: set doc.
@@ -281,17 +273,6 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 }
 
 func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
-	c.fileScope = map[adt.Feature]bool{}
-
-	if v := c.Config.Scope; v != nil {
-		for _, arc := range v.Arcs {
-			c.fileScope[arc.Label] = true
-		}
-
-		c.pushScope(nil, 0, v.Source()) // File scope
-		defer c.popScope()
-	}
-
 	expr := c.expr(x)
 
 	env := &adt.Environment{}
@@ -301,13 +282,6 @@ func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
 		top.Vertex = p
 		top.Up = &adt.Environment{}
 		top = top.Up
-
-		// TODO: do something like this to allow multi-layered scopes.
-		// e := &adt.Environment{Vertex: p}
-		// if env != nil {
-		// 	env.Up = e
-		// }
-		// env = e
 	}
 
 	return adt.MakeRootConjunct(env, expr)
@@ -343,6 +317,18 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 				UpCount: upCount,
 				Label:   label,
 			}
+		}
+		for p := c.Scope; p != nil; p = p.Parent {
+			for _, a := range p.Arcs {
+				if a.Label == label {
+					return &adt.FieldReference{
+						Src:     n,
+						UpCount: upCount,
+						Label:   label,
+					}
+				}
+			}
+			upCount++
 		}
 
 		if c.Config.Imports != nil {
@@ -588,7 +574,17 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 				Label:  label,
 			}
 
-		case *ast.Interpolation: // *ast.ParenExpr,
+		case *ast.ParenExpr:
+			if x.Token == token.ISA {
+				c.errf(x, "definitions not supported for dynamic fields")
+			}
+			return &adt.DynamicField{
+				Src:   x,
+				Key:   c.expr(l),
+				Value: value,
+			}
+
+		case *ast.Interpolation:
 			if x.Token == token.ISA {
 				c.errf(x, "definitions not supported for interpolations")
 			}

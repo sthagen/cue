@@ -136,7 +136,7 @@ func (o *structValue) Lookup(key string) Value {
 	if i == len {
 		// TODO: better message.
 		ctx := o.ctx
-		x := ctx.mkErr(o.obj, codeNotExist, "value %q not found", key)
+		x := ctx.mkErr(o.obj, adt.NotExistError, "value %q not found", key)
 		return newErrValue(o.v, x)
 	}
 	return newChildValue(o, i)
@@ -179,7 +179,7 @@ func toMarshalErr(v Value, b *adt.Bottom) error {
 	return &marshalError{v.toErr(b), b}
 }
 
-func marshalErrf(v Value, src adt.Node, code errCode, msg string, args ...interface{}) error {
+func marshalErrf(v Value, src adt.Node, code adt.ErrorCode, msg string, args ...interface{}) error {
 	arguments := append([]interface{}{code, msg}, args...)
 	b := v.idx.mkErr(src, arguments...)
 	return toMarshalErr(v, b)
@@ -848,7 +848,7 @@ func (v Value) Kind() Kind {
 	if !v.v.IsConcrete() {
 		return BottomKind
 	}
-	if v.IncompleteKind() == adt.ListKind && !v.IsClosed() {
+	if v.IncompleteKind() == adt.ListKind && !v.v.IsClosedList() {
 		return BottomKind
 	}
 	return c.Kind()
@@ -880,10 +880,10 @@ func (v Value) marshalJSON() (b []byte, err error) {
 	x := v.eval(ctx)
 
 	if _, ok := x.(adt.Resolver); ok {
-		return nil, marshalErrf(v, x, codeIncomplete, "value %q contains unresolved references", ctx.str(x))
+		return nil, marshalErrf(v, x, adt.IncompleteError, "value %q contains unresolved references", ctx.str(x))
 	}
 	if !adt.IsConcrete(x) {
-		return nil, marshalErrf(v, x, codeIncomplete, "cannot convert incomplete value %q to JSON", ctx.str(x))
+		return nil, marshalErrf(v, x, adt.IncompleteError, "cannot convert incomplete value %q to JSON", ctx.str(x))
 	}
 
 	// TODO: implement marshalles in value.
@@ -1086,11 +1086,23 @@ func (v Value) Pos() token.Pos {
 
 // IsClosed reports whether a list of struct is closed. It reports false when
 // when the value is not a list or struct.
+//
+// Deprecated: use Allows and Kind/IncompleteKind.
 func (v Value) IsClosed() bool {
 	if v.v == nil {
 		return false
 	}
-	return v.v.IsClosed(v.ctx().opCtx)
+	return v.v.IsClosedList() || v.v.IsClosedStruct()
+}
+
+// Allows reports whether a field with the given selector could be added to v.
+//
+// Allows does not take into account validators like list.MaxItems(4). This may
+// change in the future.
+func (v Value) Allows(sel Selector) bool {
+	c := v.ctx().opCtx
+	f := sel.sel.feature(c)
+	return v.v.Accept(c, f)
 }
 
 // IsConcrete reports whether the current value is a concrete scalar value
@@ -1107,7 +1119,7 @@ func (v Value) IsConcrete() bool {
 	if !adt.IsConcrete(v.v) {
 		return false
 	}
-	if v.IncompleteKind() == adt.ListKind && !v.IsClosed() {
+	if v.IncompleteKind() == adt.ListKind && !v.v.IsClosedList() {
 		return false
 	}
 	return true
@@ -1127,7 +1139,7 @@ func (v Value) Exists() bool {
 		return false
 	}
 	if err, ok := v.v.BaseValue.(*adt.Bottom); ok {
-		return err.Code != codeNotExist
+		return err.Code != adt.NotExistError
 	}
 	return true
 }
@@ -1148,7 +1160,7 @@ func (v Value) checkKind(ctx *context, want adt.Kind) *adt.Bottom {
 				ctx.opCtx.Str(x), k, want)
 		}
 		if !adt.IsConcrete(x) {
-			return ctx.mkErr(x, codeIncomplete, "non-concrete value %v", k)
+			return ctx.mkErr(x, adt.IncompleteError, "non-concrete value %v", k)
 		}
 	}
 	return nil
@@ -1168,10 +1180,9 @@ func (v Value) Len() Value {
 		switch x := v.eval(v.ctx()).(type) {
 		case *adt.Vertex:
 			if x.IsList() {
-				ctx := v.ctx()
 				n := &adt.Num{K: adt.IntKind}
 				n.X.SetInt64(int64(len(x.Elems())))
-				if x.IsClosed(ctx.opCtx) {
+				if x.IsClosedList() {
 					return remakeFinal(v, nil, n)
 				}
 				// Note: this HAS to be a Conjunction value and cannot be
@@ -1197,55 +1208,16 @@ func (v Value) Len() Value {
 }
 
 // Elem returns the value of undefined element types of lists and structs.
+//
+// Deprecated: use LookupPath in combination with "AnyString" or "AnyIndex".
 func (v Value) Elem() (Value, bool) {
-	if v.v == nil {
-		return Value{}, false
+	sel := AnyString
+	if v.v.IsList() {
+		sel = AnyIndex
 	}
-	ctx := v.ctx().opCtx
-	x := &adt.Vertex{
-		Parent: v.v,
-		Label:  0,
-	}
-	v.v.Finalize(ctx)
-	v.v.MatchAndInsert(ctx, x)
-	if len(x.Conjuncts) == 0 {
-		return Value{}, false
-	}
-	x.Finalize(ctx)
-	return makeValue(v.idx, x), true
+	x := v.LookupPath(MakePath(sel))
+	return x, x.Exists()
 }
-
-// // BulkOptionals returns all bulk optional fields as key-value pairs.
-// // See also Elem and Template.
-// func (v Value) BulkOptionals() [][2]Value {
-// 	x, ok := v.path.cache.(*structLit)
-// 	if !ok {
-// 		return nil
-// 	}
-// 	return v.appendBulk(nil, x.optionals)
-// }
-
-// func (v Value) appendBulk(a [][2]Value, x *optionals) [][2]Value {
-// 	if x == nil {
-// 		return a
-// 	}
-// 	a = v.appendBulk(a, x.left)
-// 	a = v.appendBulk(a, x.right)
-// 	for _, set := range x.fields {
-// 		if set.key != nil {
-// 			ctx := v.ctx()
-// 			fn, ok := ctx.manifest(set.value).(*lambdaExpr)
-// 			if !ok {
-// 				// create error
-// 				continue
-// 			}
-// 			x := fn.call(ctx, set.value, &basicType{K: stringKind})
-
-// 			a = append(a, [2]Value{v.makeElem(set.key), v.makeElem(x)})
-// 		}
-// 	}
-// 	return a
-// }
 
 // List creates an iterator over the values of a list or reports an error if
 // v is not a list.
@@ -1390,6 +1362,7 @@ func (v Value) structValOpts(ctx *context, o options) (s structValue, err *adt.B
 // Struct returns the underlying struct of a value or an error if the value
 // is not a struct.
 func (v Value) Struct() (*Struct, error) {
+	// TODO: deprecate
 	ctx := v.ctx()
 	obj, err := v.structValOpts(ctx, options{})
 	if err != nil {
@@ -1479,7 +1452,7 @@ func (v Value) Fields(opts ...Option) (*Iterator, error) {
 }
 
 // Lookup reports the value at a path starting from v. The empty path returns v
-// itself. Use LookupDef for definitions or LookupField for any kind of field.
+// itself.
 //
 // The Exists() method can be used to verify if the returned value existed.
 // Lookup cannot be used to look up hidden or optional fields or definitions.
@@ -1527,58 +1500,11 @@ func (v Value) Path() Path {
 	return Path{path: a}
 }
 
-// LookupPath reports the value for path p relative to v.
-func (v Value) LookupPath(p Path) Value {
-	n := v.v
-outer:
-	for _, sel := range p.path {
-		f := sel.sel.feature(v.idx.Runtime)
-		for _, a := range n.Arcs {
-			if a.Label == f {
-				n = a
-				continue outer
-			}
-		}
-		var x *adt.Bottom
-		if err, ok := sel.sel.(pathError); ok {
-			x = &adt.Bottom{Err: err.Error}
-		} else {
-			// TODO: better message.
-			x = v.idx.mkErr(n, codeNotExist, "value %q not found", sel.sel)
-		}
-		v := makeValue(v.idx, n)
-		return newErrValue(v, x)
-	}
-	return makeValue(v.idx, n)
-}
-
-// LookupDef reports the definition with the given name within struct v. The
-// Exists method of the returned value will report false if the definition did
-// not exist. The Err method reports if any error occurred during evaluation.
+// LookupDef is equal to LookupPath(MakePath(Def(name))).
+//
+// Deprecated: use LookupPath.
 func (v Value) LookupDef(name string) Value {
-	ctx := v.ctx()
-	o, err := v.structValFull(ctx)
-	if err != nil {
-		return newErrValue(v, err)
-	}
-
-	f := v.ctx().Label(name, true)
-	for i, a := range o.features {
-		if a == f {
-			if f.IsHidden() || !f.IsDef() { // optional not possible for now
-				break
-			}
-			return newChildValue(&o, i)
-		}
-	}
-	if !strings.HasPrefix(name, "#") {
-		alt := v.LookupDef("#" + name)
-		// Use the original error message if this resulted in an error as well.
-		if alt.Err() == nil {
-			return alt
-		}
-	}
-	return newErrValue(v, ctx.mkErr(v.v, "definition %q not found", name))
+	return v.LookupPath(MakePath(Def(name)))
 }
 
 var errNotFound = errors.Newf(token.NoPos, "field not found")
@@ -1586,6 +1512,8 @@ var errNotFound = errors.Newf(token.NoPos, "field not found")
 // FieldByName looks up a field for the given name. If isIdent is true, it will
 // look up a definition or hidden field (starting with `_` or `_#`). Otherwise
 // it interprets name as an arbitrary string for a regular field.
+//
+// Deprecated: use LookupPath.
 func (v Value) FieldByName(name string, isIdent bool) (f FieldInfo, err error) {
 	s, err := v.Struct()
 	if err != nil {
@@ -1596,7 +1524,7 @@ func (v Value) FieldByName(name string, isIdent bool) (f FieldInfo, err error) {
 
 // LookupField reports information about a field of v.
 //
-// Deprecated: this API does not work with new-style definitions. Use FieldByName.
+// Deprecated: use LookupPath
 func (v Value) LookupField(name string) (FieldInfo, error) {
 	s, err := v.Struct()
 	if err != nil {
@@ -1649,9 +1577,14 @@ func (v Value) Fill(x interface{}, path ...string) Value {
 // FillPath creates a new value by unifying v with the value of x at the given
 // path.
 //
-// Values may be any Go value that can be converted to CUE, an ast.Expr or a
-// Value. In the latter case, it will panic if the Value is not from the same
-// Runtime.
+// If x is an cue/ast.Expr, it will be evaluated within the context of the
+// given path: identifiers that are not resolved within the expression are
+// resolved as if they were defined at the path position.
+//
+// If x is a Value, it will be used as is. It panics if x is not created
+// from the same Runtime as v.
+//
+// Otherwise, the given Go value will be converted to CUE.
 //
 // Any reference in v referring to the value at the given path will resolve to x
 // in the newly created value. The resulting value is not validated.
@@ -1659,13 +1592,28 @@ func (v Value) Fill(x interface{}, path ...string) Value {
 // List paths are not supported at this time.
 func (v Value) FillPath(p Path, x interface{}) Value {
 	if v.v == nil {
+		// TODO: panic here?
 		return v
 	}
 	ctx := v.ctx()
 	if err := p.Err(); err != nil {
 		return newErrValue(v, ctx.mkErr(nil, 0, "invalid path: %v", err))
 	}
-	var expr adt.Expr = convert.GoValueToValue(ctx.opCtx, x, true)
+	var expr adt.Expr
+	switch x := x.(type) {
+	case Value:
+		if v.idx != x.idx {
+			panic("values are not from the same runtime")
+		}
+		expr = x.v
+	case adt.Node, adt.Feature:
+		panic("cannot set internal Value or Feature type")
+	case ast.Expr:
+		n := getScopePrefix(v, p)
+		expr = resolveExpr(ctx, n, x)
+	default:
+		expr = convert.GoValueToValue(ctx.opCtx, x, true)
+	}
 	for i := len(p.path) - 1; i >= 0; i-- {
 		expr = &adt.StructLit{Decls: []adt.Decl{
 			&adt.Field{
@@ -1687,8 +1635,9 @@ func (v Value) FillPath(p Path, x interface{}) Value {
 //
 // The returned function returns the value that would be unified with field
 // given its name.
+//
+// Deprecated: use LookupPath in combination with using optional selectors.
 func (v Value) Template() func(label string) Value {
-	// TODO: rename to optional.
 	if v.v == nil {
 		return nil
 	}
@@ -1698,17 +1647,8 @@ func (v Value) Template() func(label string) Value {
 		return nil
 	}
 
-	parent := v.v
-	ctx := v.ctx().opCtx
 	return func(label string) Value {
-		f := ctx.StringLabel(label)
-		arc := &adt.Vertex{Parent: parent, Label: f}
-		v.v.MatchAndInsert(ctx, arc)
-		if len(arc.Conjuncts) == 0 {
-			return Value{}
-		}
-		arc.Finalize(ctx)
-		return makeValue(v.idx, arc)
+		return v.LookupPath(MakePath(Str(label).Optional()))
 	}
 }
 
@@ -1769,7 +1709,7 @@ func isDef(v *adt.Vertex) bool {
 }
 
 func allowed(ctx *adt.OpContext, parent, n *adt.Vertex) *adt.Bottom {
-	if !parent.IsClosed(ctx) && !isDef(parent) {
+	if !parent.IsClosedList() && !parent.IsClosedStruct() && !isDef(parent) {
 		return nil
 	}
 

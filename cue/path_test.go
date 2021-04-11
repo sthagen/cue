@@ -70,7 +70,7 @@ func Test(t *testing.T) {
 	}, {
 		path: ParsePath("#Foo.a.c"),
 		str:  "#Foo.a.c",
-		out:  `_|_ // value "c" not found`,
+		out:  `_|_ // field "c" not found`,
 	}, {
 		path: ParsePath(`b[2]`),
 		str:  `b[2]`,
@@ -103,7 +103,7 @@ func Test(t *testing.T) {
 		path: ParsePath(`b[3T]`),
 		str:  "_|_",
 		err:  true,
-		out:  `_|_ // int label out of range (3000000000000 not >=0 and <= 268435455)`,
+		out:  `_|_ // int label out of range (3000000000000 not >=0 and <= 268435454)`,
 	}, {
 		path: ParsePath(`b[3.3]`),
 		str:  "_|_",
