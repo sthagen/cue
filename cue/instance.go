@@ -23,12 +23,13 @@ import (
 	"cuelang.org/go/internal/core/compile"
 	"cuelang.org/go/internal/core/convert"
 	"cuelang.org/go/internal/core/eval"
+	"cuelang.org/go/internal/core/runtime"
 )
 
 // An Instance defines a single configuration based on a collection of
 // underlying CUE files.
 type Instance struct {
-	*index
+	index *runtime.Runtime
 
 	root *adt.Vertex
 
@@ -45,22 +46,28 @@ type Instance struct {
 	// complete bool // for cycle detection
 }
 
-func (x *index) addInst(p *Instance) *Instance {
+func addInst(x *runtime.Runtime, p *Instance) *Instance {
 	if p.inst == nil {
 		p.inst = &build.Instance{
 			ImportPath: p.ImportPath,
 			PkgName:    p.PkgName,
 		}
 	}
-	// fmt.Println(p.ImportPath, "XXX")
 	x.AddInst(p.ImportPath, p.root, p.inst)
-	x.loaded[p.inst] = p
+	x.SetBuildData(p.inst, p)
 	p.index = x
 	return p
 }
 
-func (x *index) getImportFromBuild(p *build.Instance, v *adt.Vertex) *Instance {
-	inst := x.loaded[p]
+func lookupInstance(x *runtime.Runtime, p *build.Instance) *Instance {
+	if x, ok := x.BuildData(p); ok {
+		return x.(*Instance)
+	}
+	return nil
+}
+
+func getImportFromBuild(x *runtime.Runtime, p *build.Instance, v *adt.Vertex) *Instance {
+	inst := lookupInstance(x, p)
 
 	if inst != nil {
 		return inst
@@ -79,27 +86,27 @@ func (x *index) getImportFromBuild(p *build.Instance, v *adt.Vertex) *Instance {
 		inst.setListOrError(p.Err)
 	}
 
-	x.loaded[p] = inst
+	x.SetBuildData(p, inst)
 
 	return inst
 }
 
-func (x *index) getImportFromNode(v *adt.Vertex) *Instance {
+func getImportFromNode(x *runtime.Runtime, v *adt.Vertex) *Instance {
 	p := x.GetInstanceFromNode(v)
 	if p == nil {
 		return nil
 	}
 
-	return x.getImportFromBuild(p, v)
+	return getImportFromBuild(x, p, v)
 }
 
-func (x *index) getImportFromPath(id string) *Instance {
+func getImportFromPath(x *runtime.Runtime, id string) *Instance {
 	node, _ := x.LoadImport(id)
 	if node == nil {
 		return nil
 	}
 	b := x.GetInstanceFromNode(node)
-	inst := x.loaded[b]
+	inst := lookupInstance(x, b)
 	if inst == nil {
 		inst = &Instance{
 			ImportPath: b.ImportPath,
@@ -121,14 +128,14 @@ func init() {
 			st = &adt.Vertex{}
 			st.AddConjunct(adt.MakeRootConjunct(nil, x))
 		}
-		return v.ctx().index.addInst(&Instance{
+		return addInst(v.idx, &Instance{
 			root: st,
 		})
 	}
 }
 
 // newInstance creates a new instance. Use Insert to populate the instance.
-func newInstance(x *index, p *build.Instance, v *adt.Vertex) *Instance {
+func newInstance(x *runtime.Runtime, p *build.Instance, v *adt.Vertex) *Instance {
 	// TODO: associate root source with structLit.
 	inst := &Instance{
 		root: v,
@@ -145,7 +152,7 @@ func newInstance(x *index, p *build.Instance, v *adt.Vertex) *Instance {
 	}
 
 	x.AddInst(p.ImportPath, v, p)
-	x.loaded[p] = inst
+	x.SetBuildData(p, inst)
 	inst.index = x
 	return inst
 }
@@ -160,9 +167,9 @@ func (inst *Instance) setError(err errors.Error) {
 	inst.Err = errors.Append(inst.Err, err)
 }
 
-func (inst *Instance) eval(ctx *context) adt.Value {
+func (inst *Instance) eval(ctx *adt.OpContext) adt.Value {
 	// TODO: remove manifest here?
-	v := ctx.manifest(inst.root)
+	v := manifest(ctx, inst.root)
 	return v
 }
 
@@ -170,8 +177,8 @@ func init() {
 	internal.EvalExpr = func(value, expr interface{}) interface{} {
 		v := value.(Value)
 		e := expr.(ast.Expr)
-		ctx := v.idx.newContext()
-		return newValueRoot(ctx, evalExpr(ctx, v.vertex(ctx), e))
+		ctx := newContext(v.idx)
+		return newValueRoot(v.idx, ctx, evalExpr(ctx, v.v, e))
 	}
 }
 
@@ -181,7 +188,7 @@ func pkgID() string {
 }
 
 // evalExpr evaluates expr within scope.
-func evalExpr(ctx *context, scope *adt.Vertex, expr ast.Expr) adt.Value {
+func evalExpr(ctx *adt.OpContext, scope *adt.Vertex, expr ast.Expr) adt.Value {
 	cfg := &compile.Config{
 		Scope: scope,
 		Imports: func(x *ast.Ident) (pkgPath string) {
@@ -192,13 +199,13 @@ func evalExpr(ctx *context, scope *adt.Vertex, expr ast.Expr) adt.Value {
 		},
 	}
 
-	c, err := compile.Expr(cfg, ctx.opCtx, pkgID(), expr)
+	c, err := compile.Expr(cfg, ctx, pkgID(), expr)
 	if err != nil {
 		return &adt.Bottom{Err: err}
 	}
-	return adt.Resolve(ctx.opCtx, c)
+	return adt.Resolve(ctx, c)
 
-	// scope.Finalize(ctx.opCtx) // TODO: not appropriate here.
+	// scope.Finalize(ctx) // TODO: not appropriate here.
 	// switch s := scope.Value.(type) {
 	// case *bottom:
 	// 	return s
@@ -207,7 +214,7 @@ func evalExpr(ctx *context, scope *adt.Vertex, expr ast.Expr) adt.Value {
 	// 	return ctx.mkErr(scope, "instance is not a struct, found %s", scope.Kind())
 	// }
 
-	// c := ctx.opCtx
+	// c := ctx
 
 	// x, err := compile.Expr(&compile.Config{Scope: scope}, c.Runtime, expr)
 	// if err != nil {
@@ -262,20 +269,20 @@ func (inst *Instance) Doc() []*ast.CommentGroup {
 // defines in emit value, it will be that value. Otherwise it will be all
 // top-level values.
 func (inst *Instance) Value() Value {
-	ctx := inst.newContext()
-	inst.root.Finalize(ctx.opCtx)
-	return newVertexRoot(ctx, inst.root)
+	ctx := newContext(inst.index)
+	inst.root.Finalize(ctx)
+	return newVertexRoot(inst.index, ctx, inst.root)
 }
 
 // Eval evaluates an expression within an existing instance.
 //
 // Expressions may refer to builtin packages if they can be uniquely identified.
 func (inst *Instance) Eval(expr ast.Expr) Value {
-	ctx := inst.newContext()
+	ctx := newContext(inst.index)
 	v := inst.root
-	v.Finalize(ctx.opCtx)
+	v.Finalize(ctx)
 	result := evalExpr(ctx, v, expr)
-	return newValueRoot(ctx, result)
+	return newValueRoot(inst.index, ctx, result)
 }
 
 // DO NOT USE.
@@ -285,7 +292,7 @@ func Merge(inst ...*Instance) *Instance {
 	v := &adt.Vertex{}
 
 	i := inst[0]
-	ctx := i.index.newContext().opCtx
+	ctx := newContext(i.index)
 
 	// TODO: interesting test: use actual unification and then on K8s corpus.
 
@@ -295,7 +302,7 @@ func Merge(inst ...*Instance) *Instance {
 	}
 	v.Finalize(ctx)
 
-	p := i.index.addInst(&Instance{
+	p := addInst(i.index, &Instance{
 		root: v,
 		// complete: true,
 	})
@@ -309,7 +316,7 @@ func (inst *Instance) Build(p *build.Instance) *Instance {
 	p.Complete()
 
 	idx := inst.index
-	r := inst.index.Runtime
+	r := inst.index
 
 	rErr := r.ResolveFiles(p)
 
@@ -336,7 +343,7 @@ func (inst *Instance) Build(p *build.Instance) *Instance {
 }
 
 func (inst *Instance) value() Value {
-	return newVertexRoot(inst.newContext(), inst.root)
+	return newVertexRoot(inst.index, newContext(inst.index), inst.root)
 }
 
 // Lookup reports the value at a path starting from the top level struct. The
@@ -404,12 +411,12 @@ func (inst *Instance) Fill(x interface{}, path ...string) (*Instance, error) {
 			u.AddConjunct(c)
 		}
 	} else {
-		ctx := eval.NewContext(inst.index.Runtime, nil)
+		ctx := eval.NewContext(inst.index, nil)
 		expr := convert.GoValueToExpr(ctx, true, x)
 		u.AddConjunct(adt.MakeRootConjunct(nil, expr))
 		u.Finalize(ctx)
 	}
-	inst = inst.index.addInst(&Instance{
+	inst = addInst(inst.index, &Instance{
 		root: u,
 		inst: nil,
 

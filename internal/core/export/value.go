@@ -16,6 +16,7 @@ package export
 
 import (
 	"fmt"
+	"strings"
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/ast/astutil"
@@ -41,15 +42,19 @@ func (e *exporter) bareValue(v adt.Value) ast.Expr {
 // value with a reference in graph mode.
 
 func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
+	var attrs []*ast.Attribute
+	if e.cfg.ShowAttributes {
+		attrs = ExtractDeclAttrs(n)
+	}
 	switch x := n.BaseValue.(type) {
 	case nil:
 		// bare
 	case *adt.StructMarker:
-		result = e.structComposite(n)
+		result = e.structComposite(n, attrs)
 
 	case *adt.ListMarker:
-		if e.showArcs(n) {
-			result = e.structComposite(n)
+		if e.showArcs(n) || attrs != nil {
+			result = e.structComposite(n, attrs)
 		} else {
 			result = e.listComposite(n)
 		}
@@ -58,10 +63,10 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 		switch {
 		case e.cfg.ShowErrors && x.ChildError:
 			// TODO(perf): use precompiled arc statistics
-			if len(n.Arcs) > 0 && n.Arcs[0].Label.IsInt() && !e.showArcs(n) {
+			if len(n.Arcs) > 0 && n.Arcs[0].Label.IsInt() && !e.showArcs(n) && attrs == nil {
 				result = e.listComposite(n)
 			} else {
-				result = e.structComposite(n)
+				result = e.structComposite(n, attrs)
 			}
 
 		case !x.IsIncomplete() || len(n.Conjuncts) == 0:
@@ -69,8 +74,8 @@ func (e *exporter) vertex(n *adt.Vertex) (result ast.Expr) {
 		}
 
 	case adt.Value:
-		if e.showArcs(n) {
-			result = e.structComposite(n)
+		if e.showArcs(n) || attrs != nil {
+			result = e.structComposite(n, attrs)
 		} else {
 			result = e.value(x, n.Conjuncts...)
 		}
@@ -245,8 +250,11 @@ func (e *exporter) num(n *adt.Num, orig []adt.Conjunct) *ast.BasicLit {
 	if n.K&adt.IntKind != 0 {
 		kind = token.INT
 	}
-	return &ast.BasicLit{Kind: kind, Value: n.X.String()}
-
+	s := n.X.String()
+	if kind == token.FLOAT && !strings.ContainsAny(s, "eE.") {
+		s += "."
+	}
+	return &ast.BasicLit{Kind: kind, Value: s}
 }
 
 func (e *exporter) string(n *adt.String, orig []adt.Conjunct) *ast.BasicLit {
@@ -333,7 +341,7 @@ func (e exporter) showArcs(v *adt.Vertex) bool {
 	return false
 }
 
-func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
+func (e *exporter) structComposite(v *adt.Vertex, attrs []*ast.Attribute) ast.Expr {
 	s, saved := e.pushFrame(v.Conjuncts)
 	e.top().upCount++
 	defer func() {
@@ -370,10 +378,8 @@ func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 		e.addEmbed(e.value(x))
 	}
 
-	if e.cfg.ShowAttributes {
-		for _, a := range ExtractDeclAttrs(v.Conjuncts) {
-			s.Elts = append(s.Elts, a)
-		}
+	for _, a := range attrs {
+		s.Elts = append(s.Elts, a)
 	}
 
 	p := e.cfg
@@ -430,7 +436,7 @@ func (e *exporter) structComposite(v *adt.Vertex) ast.Expr {
 		}
 
 		if p.ShowAttributes {
-			f.Attrs = ExtractFieldAttrs(arc.Conjuncts)
+			f.Attrs = ExtractFieldAttrs(arc)
 		}
 
 		if p.ShowDocs {

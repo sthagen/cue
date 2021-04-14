@@ -39,9 +39,6 @@ import (
 // Right now Decimal is aliased to apd.Decimal. This may change in the future.
 type Decimal = apd.Decimal
 
-// DebugStr prints a syntax node.
-var DebugStr func(x interface{}) string
-
 // ErrIncomplete can be used by builtins to signal the evaluation was
 // incomplete.
 var ErrIncomplete = errors.New("incomplete value")
@@ -72,10 +69,6 @@ var UnifyBuiltin func(v interface{}, kind string) interface{}
 
 // GetRuntime reports the runtime for an Instance or Value.
 var GetRuntime func(instance interface{}) interface{}
-
-// CoreValue returns an *runtime.Index and *adt.Vertex for a cue.Value.
-// It returns nil if value is not a cue.Value.
-var CoreValue func(value interface{}) (runtime, vertex interface{})
 
 // MakeInstance makes a new instance from a value.
 var MakeInstance func(value interface{}) (instance interface{})

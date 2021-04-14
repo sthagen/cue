@@ -123,13 +123,17 @@ type buildPlan struct {
 	cmd   *Command
 	insts []*build.Instance
 
+	// instance is a pre-compiled instance, which exists if value files are
+	// being processed, which may require a schema to decode.
+	instance *cue.Instance
+
 	cfg *config
 
 	// If orphanFiles are mixed with CUE files and/or if placement flags are used,
 	// the instance is also included in insts.
 	importing      bool
 	mergeData      bool // do not merge individual data files.
-	orphaned       []*build.File
+	orphaned       []*decoderInfo
 	orphanInstance *build.Instance
 	// imported files are files that were orphaned in the build instance, but
 	// were placed in the instance by using one the --files, --list or --path
@@ -139,11 +143,16 @@ type buildPlan struct {
 	expressions []ast.Expr // only evaluate these expressions within results
 	schema      ast.Expr   // selects schema in instance for orphaned values
 
+	// orphan placement flags.
+	perFile    bool
+	useList    bool
+	path       []ast.Label
+	useContext bool
+
 	// outFile defines the file to output to. Default is CUE stdout.
 	outFile *build.File
 
 	encConfig *encoding.Config
-	merge     []*build.Instance
 }
 
 // instances iterates either over a list of instances, or a list of
@@ -151,10 +160,18 @@ type buildPlan struct {
 // instance, with which the data instance may be merged.
 func (b *buildPlan) instances() iterator {
 	var i iterator
-	if len(b.orphaned) == 0 {
-		i = &instanceIterator{a: buildInstances(b.cmd, b.insts), i: -1}
-	} else {
+	switch {
+	case len(b.orphaned) > 0:
 		i = newStreamingIterator(b)
+	case len(b.insts) > 0:
+		i = &instanceIterator{
+			inst: b.instance,
+			a:    buildInstances(b.cmd, b.insts),
+			i:    -1,
+		}
+	default:
+		i = &instanceIterator{a: []*cue.Instance{b.instance}, i: -1}
+		b.instance = nil
 	}
 	if len(b.expressions) > 0 {
 		return &expressionIter{
@@ -177,9 +194,10 @@ type iterator interface {
 }
 
 type instanceIterator struct {
-	a []*cue.Instance
-	i int
-	e error
+	inst *cue.Instance
+	a    []*cue.Instance
+	i    int
+	e    error
 }
 
 func (i *instanceIterator) scan() bool {
@@ -187,24 +205,33 @@ func (i *instanceIterator) scan() bool {
 	return i.i < len(i.a) && i.e == nil
 }
 
-func (i *instanceIterator) close()                  {}
-func (i *instanceIterator) err() error              { return i.e }
-func (i *instanceIterator) value() cue.Value        { return i.a[i.i].Value() }
-func (i *instanceIterator) instance() *cue.Instance { return i.a[i.i] }
-func (i *instanceIterator) file() *ast.File         { return nil }
-func (i *instanceIterator) id() string              { return i.a[i.i].Dir }
+func (i *instanceIterator) close()     {}
+func (i *instanceIterator) err() error { return i.e }
+func (i *instanceIterator) value() cue.Value {
+	v := i.a[i.i].Value()
+	if i.inst != nil {
+		v = v.Unify(i.inst.Value())
+	}
+	return v
+}
+func (i *instanceIterator) instance() *cue.Instance {
+	if i.inst != nil {
+		return nil
+	}
+	return i.a[i.i]
+}
+func (i *instanceIterator) file() *ast.File { return nil }
+func (i *instanceIterator) id() string      { return i.a[i.i].Dir }
 
 type streamingIterator struct {
-	r    *cue.Runtime
-	inst *cue.Instance
-	base cue.Value
-	b    *buildPlan
-	cfg  *encoding.Config
-	a    []*build.File
-	dec  *encoding.Decoder
-	v    cue.Value
-	f    *ast.File
-	e    error
+	r   *cue.Runtime
+	b   *buildPlan
+	cfg *encoding.Config
+	a   []*decoderInfo
+	dec *encoding.Decoder
+	v   cue.Value
+	f   *ast.File
+	e   error
 }
 
 func newStreamingIterator(b *buildPlan) *streamingIterator {
@@ -215,27 +242,9 @@ func newStreamingIterator(b *buildPlan) *streamingIterator {
 	}
 
 	// TODO: use orphanedSchema
-	switch len(b.insts) {
-	case 0:
-		i.r = &cue.Runtime{}
-	case 1:
-		p := b.insts[0]
-		inst := buildInstances(b.cmd, []*build.Instance{p})[0]
-		if inst.Err != nil {
-			return &streamingIterator{e: inst.Err}
-		}
-		i.r = internal.GetRuntime(inst).(*cue.Runtime)
-		if b.schema == nil {
-			i.base = inst.Value()
-		} else {
-			i.base = inst.Eval(b.schema)
-			if err := i.base.Err(); err != nil {
-				return &streamingIterator{e: err}
-			}
-		}
-	default:
-		return &streamingIterator{e: errors.Newf(token.NoPos,
-			"cannot combine data streaming with multiple instances")}
+	i.r = &cue.Runtime{}
+	if v := b.encConfig.Schema; v.Exists() {
+		i.r = internal.GetRuntime(v).(*cue.Runtime)
 	}
 
 	return i
@@ -246,9 +255,6 @@ func (i *streamingIterator) value() cue.Value        { return i.v }
 func (i *streamingIterator) instance() *cue.Instance { return nil }
 
 func (i *streamingIterator) id() string {
-	if i.inst != nil {
-		return i.inst.Dir
-	}
 	return ""
 }
 
@@ -272,7 +278,7 @@ func (i *streamingIterator) scan() bool {
 			return false
 		}
 
-		i.dec = encoding.NewDecoder(i.a[0], i.cfg)
+		i.dec = i.a[0].dec(i.b)
 		if i.e = i.dec.Err(); i.e != nil {
 			return false
 		}
@@ -287,10 +293,10 @@ func (i *streamingIterator) scan() bool {
 		return false
 	}
 	i.v = inst.Value()
-	if i.base.Exists() {
-		i.e = i.base.Err()
+	if schema := i.b.encConfig.Schema; schema.Exists() {
+		i.e = schema.Err()
 		if i.e == nil {
-			i.v = i.v.Unify(i.base)
+			i.v = i.v.Unify(schema)
 			i.e = i.v.Err()
 		}
 		i.f = nil
@@ -377,6 +383,87 @@ func newBuildPlan(cmd *Command, args []string, cfg *config) (p *buildPlan, err e
 	return p, nil
 }
 
+type decoderInfo struct {
+	file *build.File
+	d    *encoding.Decoder // may be nil if delayed
+}
+
+func (d *decoderInfo) dec(b *buildPlan) *encoding.Decoder {
+	if d.d == nil {
+		d.d = encoding.NewDecoder(d.file, b.encConfig)
+	}
+	return d.d
+}
+
+func (d *decoderInfo) close() {
+	if d.d != nil {
+		d.d.Close()
+	}
+}
+
+// getDecoders takes the orphaned files of the given instance and splits them in
+// schemas and values, saving the build.File and encoding.Decoder in the
+// returned slices. It is up to the caller to Close any of the decoders that are
+// returned.
+func (p *buildPlan) getDecoders(b *build.Instance) (schemas, values []*decoderInfo, err error) {
+	for _, f := range b.OrphanedFiles {
+		switch f.Encoding {
+		case build.Protobuf, build.YAML, build.JSON, build.JSONL, build.Text:
+		default:
+			return schemas, values, errors.Newf(token.NoPos,
+				"unsupported encoding %q", f.Encoding)
+		}
+
+		// We add the module root to the path if there is a module defined.
+		c := *p.encConfig
+		if b.Module != "" {
+			c.ProtoPath = append(c.ProtoPath, b.Root)
+		}
+		d := encoding.NewDecoder(f, &c)
+
+		fi, err := filetypes.FromFile(f, p.cfg.outMode)
+		if err != nil {
+			return schemas, values, err
+		}
+		switch {
+		// case !fi.Schema: // TODO: value/schema/auto
+		// 	values = append(values, d)
+		case fi.Form != build.Schema && fi.Form != build.Final:
+			values = append(values, &decoderInfo{f, d})
+
+		case f.Interpretation != build.Auto:
+			schemas = append(schemas, &decoderInfo{f, d})
+
+		case d.Interpretation() == "":
+			values = append(values, &decoderInfo{f, d})
+
+		default:
+			schemas = append(schemas, &decoderInfo{f, d})
+		}
+	}
+	return schemas, values, nil
+}
+
+// importFiles imports orphan files for existing instances. Note that during
+// import, both schemas and non-schemas are placed (TODO: should we allow schema
+// mode here as well? It seems that the existing package should have enough
+// typing to allow for schemas).
+//
+// It is a separate call to allow closing decoders between processing each
+// package.
+func (p *buildPlan) importFiles(b *build.Instance) error {
+	// TODO: assume textproto is imported at top-level or just ignore them.
+
+	schemas, values, err := p.getDecoders(b)
+	for _, d := range append(schemas, values...) {
+		defer d.close()
+	}
+	if err != nil {
+		return err
+	}
+	return p.placeOrphans(b, append(schemas, values...))
+}
+
 func parseArgs(cmd *Command, args []string, cfg *config) (p *buildPlan, err error) {
 	p, err = newBuildPlan(cmd, args, cfg)
 	if err != nil {
@@ -388,76 +475,49 @@ func parseArgs(cmd *Command, args []string, cfg *config) (p *buildPlan, err erro
 		return nil, errors.Newf(token.NoPos, "invalid args")
 	}
 
+	if err := p.parsePlacementFlags(); err != nil {
+		return nil, err
+	}
+
 	for _, b := range builds {
 		if b.Err != nil {
 			return nil, b.Err
 		}
-		var ok bool
-		if b.User || p.importing {
-			ok, err = p.placeOrphans(b)
-			if err != nil {
-				return nil, err
+		switch {
+		case !b.User:
+			if p.importing {
+				if err := p.importFiles(b); err != nil {
+					return nil, err
+				}
 			}
-		}
-		if !b.User {
 			p.insts = append(p.insts, b)
-			continue
-		}
-		addedUser := false
-		if len(b.BuildFiles) > 0 {
-			addedUser = true
-			p.insts = append(p.insts, b)
-		}
-		if ok {
-			continue
-		}
 
-		if len(b.OrphanedFiles) == 0 {
-			continue
-		}
-
-		if p.orphanInstance != nil {
+		case p.orphanInstance != nil:
 			return nil, errors.Newf(token.NoPos,
 				"builds contain two file packages")
-		}
-		p.orphanInstance = b
-		p.encConfig.Stream = true
 
-		for _, f := range b.OrphanedFiles {
-			switch f.Encoding {
-			case build.Protobuf, build.YAML, build.JSON, build.Text:
-			default:
-				return nil, errors.Newf(token.NoPos,
-					"unsupported encoding %q", f.Encoding)
-			}
+		default:
+			p.orphanInstance = b
+		}
+	}
+
+	if b := p.orphanInstance; b != nil {
+		schemas, values, err := p.getDecoders(b)
+		for _, d := range append(schemas, values...) {
+			defer d.close()
+		}
+		if err != nil {
+			return nil, err
 		}
 
-		// TODO: this processing could probably be delayed, or at least
-		// simplified. The main reason to do this here is to allow interpreting
-		// the --schema/-d flag, while allowing to use this for OpenAPI and
-		// JSON Schema in auto-detect mode.
-		buildFiles := []*build.File{}
-		for _, f := range b.OrphanedFiles {
-			d := encoding.NewDecoder(f, p.encConfig)
+		if values == nil {
+			values, schemas = schemas, values
+		}
+
+		for _, di := range schemas {
+			d := di.dec(p)
 			for ; !d.Done(); d.Next() {
-				file := d.File()
-				sub := &build.File{
-					Filename:       d.Filename(),
-					Encoding:       f.Encoding,
-					Interpretation: d.Interpretation(),
-					Form:           f.Form,
-					Tags:           f.Tags,
-					Source:         file,
-				}
-				if (!p.mergeData || p.schema != nil) && d.Interpretation() == "" {
-					switch sub.Encoding {
-					case build.YAML, build.JSON, build.Text:
-						p.orphaned = append(p.orphaned, sub)
-						continue
-					}
-				}
-				buildFiles = append(buildFiles, sub)
-				if err := b.AddSyntax(file); err != nil {
+				if err := b.AddSyntax(d.File()); err != nil {
 					return nil, err
 				}
 			}
@@ -466,17 +526,61 @@ func parseArgs(cmd *Command, args []string, cfg *config) (p *buildPlan, err erro
 			}
 		}
 
-		if !addedUser && len(b.Files) > 0 {
-			p.insts = append(p.insts, b)
-		} else if len(p.orphaned) == 0 {
-			// Instance with only a single build: just print the file.
-			p.orphaned = append(p.orphaned, buildFiles...)
+		if len(p.insts) > 1 && p.schema != nil {
+			return nil, errors.Newf(token.NoPos,
+				"cannot use --schema/-d with flag more than one schema")
 		}
-	}
 
-	if len(p.insts) > 1 && p.schema != nil {
-		return nil, errors.Newf(token.NoPos,
-			"cannot use --schema/-d flag more than one schema")
+		var schema *build.Instance
+		switch n := len(p.insts); n {
+		default:
+			return nil, errors.Newf(token.NoPos,
+				"too many packages defined (%d) in combination with files", n)
+		case 1:
+			if len(schemas) > 0 {
+				return nil, errors.Newf(token.NoPos,
+					"cannot combine packages with individual schema files")
+			}
+			schema = p.insts[0]
+			p.insts = nil
+
+		case 0:
+			bb := *b
+			schema = &bb
+			b.BuildFiles = nil
+			b.Files = nil
+		}
+
+		if schema != nil && len(schema.Files) > 0 {
+			inst := buildInstances(p.cmd, []*build.Instance{schema})[0]
+
+			if inst.Err != nil {
+				return nil, err
+			}
+			p.instance = inst
+			p.encConfig.Schema = inst.Value()
+			if p.schema != nil {
+				v := inst.Eval(p.schema)
+				if err := v.Err(); err != nil {
+					return nil, err
+				}
+				p.encConfig.Schema = v
+			}
+		}
+
+		switch {
+		case p.mergeData, p.usePlacement(), p.importing:
+			if err = p.placeOrphans(b, values); err != nil {
+				return nil, err
+			}
+
+		default:
+			p.orphaned = values
+		}
+
+		if len(b.Files) > 0 {
+			p.insts = append(p.insts, b)
+		}
 	}
 
 	if len(p.expressions) > 1 {

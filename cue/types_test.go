@@ -29,7 +29,7 @@ import (
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/errors"
-	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/astinternal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/debug"
 )
@@ -823,7 +823,7 @@ v: #X
 			t.Errorf("got %v; want %v", got, tc.raw)
 		}
 
-		got := fmt.Sprint(internal.DebugStr(v.Eval().Syntax()))
+		got := fmt.Sprint(astinternal.DebugStr(v.Eval().Syntax()))
 		if got != tc.eval {
 			t.Errorf("got %v; want %v", got, tc.eval)
 		}
@@ -845,7 +845,7 @@ v: #X
 			t.Errorf("got %v; want %v", got, tc.raw)
 		}
 
-		got = fmt.Sprint(internal.DebugStr(v.Eval().Syntax()))
+		got = fmt.Sprint(astinternal.DebugStr(v.Eval().Syntax()))
 		if got != tc.eval {
 			t.Errorf("got %v; want %v", got, tc.eval)
 		}
@@ -1646,7 +1646,7 @@ func TestElem(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run("", func(t *testing.T) {
 			v := getInstance(t, tc.value).Value()
-			v.v.Finalize(v.ctx().opCtx) // TODO: do in instance.
+			v.v.Finalize(v.ctx()) // TODO: do in instance.
 			for _, p := range tc.path {
 				if p == "" {
 					var ok bool
@@ -1659,7 +1659,7 @@ func TestElem(t *testing.T) {
 				}
 			}
 			got := fmt.Sprint(v)
-			// got := debug.NodeString(v.ctx().opCtx, v.v, &debug.Config{Compact: true})
+			// got := debug.NodeString(v.ctx(), v.v, &debug.Config{Compact: true})
 			if got != tc.want {
 				t.Errorf("\n got: %q\nwant: %q", got, tc.want)
 			}
@@ -2309,7 +2309,7 @@ func TestValueLookup(t *testing.T) {
 				t.Errorf("exists: got %v; want %v", got, tc.notExists)
 			}
 
-			got := v.ctx().opCtx.Str(v.v)
+			got := v.ctx().Str(v.v)
 			if tc.str == "" {
 				t.Fatalf("str empty, got %q", got)
 			}
@@ -3650,5 +3650,5 @@ func exprStr(v Value) string {
 func compactRawStr(v Value) string {
 	ctx := v.ctx()
 	cfg := &debug.Config{Compact: true, Raw: true}
-	return debug.NodeString(ctx.opCtx, v.v, cfg)
+	return debug.NodeString(ctx, v.v, cfg)
 }
