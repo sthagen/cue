@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package jsonpb
+package jsonpb_test
 
 import (
 	"strings"
@@ -25,6 +25,7 @@ import (
 	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/parser"
 	"cuelang.org/go/encoding/json"
+	"cuelang.org/go/encoding/protobuf/jsonpb"
 	"cuelang.org/go/encoding/yaml"
 	"cuelang.org/go/internal/cuetest"
 	"cuelang.org/go/internal/cuetxtar"
@@ -85,7 +86,7 @@ func TestParse(t *testing.T) {
 			}
 
 			w := t.Writer(f.Name)
-			err := NewDecoder(schema).RewriteFile(file)
+			err := jsonpb.NewDecoder(schema).RewriteFile(file)
 			if err != nil {
 				errors.Print(w, err, nil)
 				continue
@@ -121,7 +122,7 @@ func TestX(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := NewDecoder(inst.Value()).RewriteFile(file); err != nil {
+	if err := jsonpb.NewDecoder(inst.Value()).RewriteFile(file); err != nil {
 		t.Fatal(err)
 	}
 

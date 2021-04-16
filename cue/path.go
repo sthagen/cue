@@ -44,6 +44,11 @@ func (sel Selector) IsString() bool {
 	return sel.sel.kind() == adt.StringLabel
 }
 
+// IsDefinition reports whether sel is a non-hidden definition label type.
+func (sel Selector) IsDefinition() bool {
+	return sel.sel.kind() == adt.DefinitionLabel
+}
+
 var (
 	// AnyField can be used to ask for any single label.
 	//
@@ -463,9 +468,42 @@ type pathError struct {
 	errors.Error
 }
 
-func (p pathError) String() string        { return p.Error.Error() }
+func (p pathError) String() string        { return "" }
 func (p pathError) optional() bool        { return false }
 func (p pathError) kind() adt.FeatureType { return 0 }
 func (p pathError) feature(r adt.Runtime) adt.Feature {
 	return adt.InvalidLabel
+}
+
+func valueToSel(v adt.Value) Selector {
+	switch x := adt.Unwrap(v).(type) {
+	case *adt.Num:
+		i, err := x.X.Int64()
+		if err != nil {
+			return Selector{&pathError{errors.Promote(err, "invalid number")}}
+		}
+		return Index(int(i))
+	case *adt.String:
+		return Str(x.Str)
+	default:
+		return Selector{pathError{errors.Newf(token.NoPos, "dynamic selector")}}
+	}
+}
+
+func featureToSel(f adt.Feature, r adt.Runtime) Selector {
+	switch f.Typ() {
+	case adt.StringLabel:
+		return Str(f.StringValue(r))
+	case adt.IntLabel:
+		return Index(f.Index())
+	case adt.DefinitionLabel:
+		return Def(f.IdentString(r))
+	case adt.HiddenLabel, adt.HiddenDefinitionLabel:
+		ident := f.IdentString(r)
+		pkg := f.PkgID(r)
+		return Hid(ident, pkg)
+	}
+	return Selector{pathError{
+		errors.Newf(token.NoPos, "unexpected feature type %v", f.Typ()),
+	}}
 }
