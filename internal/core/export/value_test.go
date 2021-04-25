@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"testing"
 
-	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/internal/core/adt"
@@ -43,14 +42,14 @@ func TestValue(t *testing.T) {
 		Skip:   exclude,
 	}
 
-	r := cue.NewRuntime()
+	r := runtime.New()
 
 	test.Run(t, func(t *cuetxtar.Test) {
 		a := t.ValidInstances()
 
 		pkgID := a[0].ID()
 
-		v, err := r.Build(a[0])
+		v, err := r.Build(nil, a[0])
 		if err != nil {
 			t.Fatal(err)
 		}

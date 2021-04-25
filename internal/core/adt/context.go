@@ -26,7 +26,6 @@ import (
 
 	"cuelang.org/go/cue/ast"
 	"cuelang.org/go/cue/errors"
-	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/token"
 )
 
@@ -274,8 +273,9 @@ func (c *OpContext) relLabel(upCount int32) Feature {
 
 func (c *OpContext) concreteIsPossible(op Op, x Expr) bool {
 	if !AssertConcreteIsPossible(op, x) {
-		c.AddErrf("invalid operand %s ('%s' requires concrete value)",
-			c.Str(x), op)
+		// No need to take position of expression.
+		c.AddErr(c.NewPosf(token.NoPos,
+			"invalid operand %s ('%s' requires concrete value)", x, op))
 		return false
 	}
 	return true
@@ -306,18 +306,6 @@ func (c *OpContext) Err() *Bottom {
 }
 
 func (c *OpContext) addErrf(code ErrorCode, pos token.Pos, msg string, args ...interface{}) {
-	for i, a := range args {
-		switch x := a.(type) {
-		case Node:
-			args[i] = c.Str(x)
-		case ast.Node:
-			b, _ := format.Node(x)
-			args[i] = string(b)
-		case Feature:
-			args[i] = x.SelectorString(c.Runtime)
-		}
-	}
-
 	err := c.NewPosf(pos, msg, args...)
 	c.addErr(code, err)
 }
@@ -453,17 +441,17 @@ func (c *OpContext) Yield(env *Environment, y Yielder, f YieldFunc) *Bottom {
 // msg is used to mention the context in which an error occurred, if any.
 func (c *OpContext) Concrete(env *Environment, x Expr, msg interface{}) (result Value, complete bool) {
 
-	v, complete := c.Evaluate(env, x)
+	w, complete := c.Evaluate(env, x)
 
-	v, ok := c.getDefault(v)
+	w, ok := c.getDefault(w)
 	if !ok {
-		return v, false
+		return w, false
 	}
-	v = Unwrap(v)
+	v := Unwrap(w)
 
 	if !IsConcrete(v) {
 		complete = false
-		b := c.NewErrf("non-concrete value %v in operand to %s", c.Str(v), msg)
+		b := c.NewErrf("non-concrete value %v in operand to %s", w, msg)
 		b.Code = IncompleteError
 		v = b
 	}
@@ -504,7 +492,7 @@ func (c *OpContext) getDefault(v Value) (result Value, ok bool) {
 
 	if d.NumDefaults != 1 {
 		c.addErrf(IncompleteError, c.pos(),
-			"unresolved disjunction %s (type %s)", c.Str(d), d.Kind())
+			"unresolved disjunction %s (type %s)", d, d.Kind())
 		return nil, false
 	}
 	return c.getDefault(d.Values[0])
@@ -597,13 +585,14 @@ func (c *OpContext) evalState(v Expr, state VertexStatus) (result Value) {
 		if b, ok := result.(*Bottom); ok {
 			if c.src != nil &&
 				b.Code == CycleError &&
-				b.Err.Position() == token.NoPos &&
-				len(b.Err.InputPositions()) == 0 {
+				len(errors.Positions(b.Err)) == 0 {
 				bb := *b
 				bb.Err = errors.Wrapf(b.Err, c.src.Pos(), "")
 				result = &bb
 			}
-			c.errs = CombineErrors(c.src, c.errs, result)
+			if c.errs != result {
+				c.errs = CombineErrors(c.src, c.errs, result)
+			}
 		}
 		if c.errs != nil {
 			result = c.errs
@@ -752,7 +741,7 @@ func (c *OpContext) lookup(x *Vertex, pos token.Pos, l Feature, state VertexStat
 		}
 
 	case nil:
-		// c.addErrf(IncompleteError, pos, "incomplete value %s", c.Str(x))
+		// c.addErrf(IncompleteError, pos, "incomplete value %s", x)
 		// return nil
 
 	case *Bottom:
@@ -847,10 +836,9 @@ func (c *OpContext) typeError(v Value, k Kind) {
 		return
 	}
 	if !IsConcrete(v) && v.Kind()&k != 0 {
-		c.addErrf(IncompleteError, pos(v),
-			"incomplete %s value '%s'", k, c.Str(v))
+		c.addErrf(IncompleteError, pos(v), "incomplete %s value '%s'", k, v)
 	} else {
-		c.AddErrf("cannot use %s (type %s) as type %s", c.Str(v), v.Kind(), k)
+		c.AddErrf("cannot use %s (type %s) as type %s", v, v.Kind(), k)
 	}
 }
 
@@ -864,10 +852,9 @@ func (c *OpContext) typeErrorAs(v Value, k Kind, as interface{}) {
 	}
 	if !IsConcrete(v) && v.Kind()&k != 0 {
 		c.addErrf(IncompleteError, pos(v),
-			"incomplete %s value '%s' in as", k, c.Str(v), as)
+			"incomplete %s value '%s' in as", k, v, as)
 	} else {
-		c.AddErrf("cannot use %s (type %s) as type %s in %v",
-			c.Str(v), v.Kind(), k, as)
+		c.AddErrf("cannot use %s (type %s) as type %s in %v", v, v.Kind(), k, as)
 	}
 }
 
@@ -912,11 +899,10 @@ func (c *OpContext) node(orig Node, x Expr, scalar bool, state VertexStatus) *Ve
 		switch orig.(type) {
 		case *ForClause:
 			c.addErrf(IncompleteError, pos(x),
-				"cannot range over %s (incomplete)",
-				c.Str(x))
+				"cannot range over %s (incomplete)", x)
 		default:
 			c.addErrf(IncompleteError, pos(x),
-				"%s undefined (%s is incomplete)", c.Str(orig), c.Str(x))
+				"%s undefined (%s is incomplete)", orig, x)
 		}
 		return emptyNode
 
@@ -937,12 +923,10 @@ func (c *OpContext) node(orig Node, x Expr, scalar bool, state VertexStatus) *Ve
 			switch orig.(type) {
 			case *ForClause:
 				c.addErrf(IncompleteError, pos(x),
-					"cannot range over %s (incomplete type %s)",
-					c.Str(x), kind)
+					"cannot range over %s (incomplete type %s)", x, kind)
 			default:
 				c.addErrf(IncompleteError, pos(x),
-					"%s undefined as %s is incomplete (type %s)",
-					c.Str(orig), c.Str(x), kind)
+					"%s undefined as %s is incomplete (type %s)", orig, x, kind)
 			}
 			return emptyNode
 
@@ -1108,7 +1092,7 @@ func (c *OpContext) toStringValue(v Value, k Kind, as interface{}) string {
 
 	default:
 		c.addErrf(IncompleteError, c.pos(),
-			"non-concrete value %s (type %s)", c.Str(v), v.Kind())
+			"non-concrete value %s (type %s)", v, v.Kind())
 	}
 	return ""
 }

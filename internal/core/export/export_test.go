@@ -19,6 +19,7 @@ import (
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/ast"
+	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/format"
 	"cuelang.org/go/cue/parser"
@@ -32,6 +33,7 @@ import (
 	"cuelang.org/go/internal/core/runtime"
 	"cuelang.org/go/internal/cuetest"
 	"cuelang.org/go/internal/cuetxtar"
+	"cuelang.org/go/internal/value"
 	"github.com/rogpeppe/go-internal/txtar"
 )
 
@@ -42,7 +44,7 @@ func TestDefinition(t *testing.T) {
 		Update: cuetest.UpdateGoldenFiles,
 	}
 
-	r := cue.NewRuntime()
+	r := runtime.New()
 
 	test.Run(t, func(t *cuetxtar.Test) {
 		a := t.ValidInstances()
@@ -75,9 +77,12 @@ func formatNode(t *testing.T, n ast.Node) []byte {
 // TestGenerated tests conversions of generated Go structs, which may be
 // different from parsed or evaluated CUE, such as having Vertex values.
 func TestGenerated(t *testing.T) {
+	ctx := cuecontext.New()
+
 	testCases := []struct {
 		in  func(ctx *adt.OpContext) (adt.Expr, error)
 		out string
+		p   *export.Profile
 	}{{
 		in: func(ctx *adt.OpContext) (adt.Expr, error) {
 			in := &C{
@@ -85,7 +90,7 @@ func TestGenerated(t *testing.T) {
 			}
 			return convert.GoValueToValue(ctx, in, false), nil
 		},
-		out: `{Terminals: [{Name: "Name", Description: "Desc"}]}`,
+		out: `Terminals: [{Name: "Name", Description: "Desc"}]`,
 	}, {
 		in: func(ctx *adt.OpContext) (adt.Expr, error) {
 			in := &C{
@@ -132,21 +137,84 @@ func TestGenerated(t *testing.T) {
 			return n, nil
 		},
 		out: `<[l2// x: undefined field #Terminal] _|_>`,
+		p:   export.Final,
+	}, {
+		in: func(r *adt.OpContext) (adt.Expr, error) {
+			v := ctx.CompileString(`
+				#Provider: {
+					ID: string
+					notConcrete: bool
+					a: int
+					b: a + 1
+				}`)
+
+			spec := v.LookupPath(cue.ParsePath("#Provider"))
+			spec2 := spec.FillPath(cue.ParsePath("ID"), "12345")
+			root := v.FillPath(cue.ParsePath("providers.foo"), spec2)
+			_, n := value.ToInternal(root)
+
+			return n, nil
+		},
+		out: `#Provider: {ID: string, notConcrete: bool, a: int, b: a+1}, providers: {foo: {ID: "12345", notConcrete: bool, a: int, b: a+1}}`,
+		p:   export.All,
+	}, {
+		// Issue #882
+		in: func(r *adt.OpContext) (adt.Expr, error) {
+			valA := ctx.CompileString(`
+				#One: { version: string }
+			`)
+
+			valB := ctx.CompileString(`
+				#One: _
+				ones: {[string]: #One}
+			`)
+			v := valB.Unify(valA)
+			_, n := value.ToInternal(v)
+			return n, nil
+		},
+		out: `#One: {version: string}, ones: {[string]: #One}`,
+		p:   export.All,
+	}, {
+		// Indicate closedness in an element that is closed and misses parent
+		// context.
+		// Issue #882
+		in: func(r *adt.OpContext) (adt.Expr, error) {
+			v := ctx.CompileString(`
+					#A: b: c: string
+				`)
+			v = v.LookupPath(cue.ParsePath("#A.b"))
+
+			_, n := value.ToInternal(v)
+			return n, nil
+		},
+		out: `_#def, _#def: {c: string}`,
+		p:   export.All,
 	}}
 	for _, tc := range testCases {
 		t.Run("", func(t *testing.T) {
-			r := runtime.New()
-			ctx := adt.NewContext(r, &adt.Vertex{})
+			ctx := adt.NewContext((*runtime.Runtime)(ctx), &adt.Vertex{})
 
 			v, err := tc.in(ctx)
 			if err != nil {
 				t.Fatal("failed test case: ", err)
 			}
-			expr, err := export.Expr(ctx, "", v)
+
+			p := tc.p
+			if p == nil {
+				p = export.Simplified
+			}
+
+			var n ast.Node
+			switch x := v.(type) {
+			case *adt.Vertex:
+				n, err = p.Def(ctx, "", x)
+			default:
+				n, err = p.Expr(ctx, "", v)
+			}
 			if err != nil {
 				t.Fatal("failed export: ", err)
 			}
-			got := astinternal.DebugStr(expr)
+			got := astinternal.DebugStr(n)
 			if got != tc.out {
 				t.Errorf("got:  %s\nwant: %s", got, tc.out)
 			}

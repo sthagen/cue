@@ -23,9 +23,11 @@ import (
 	"github.com/rogpeppe/go-internal/txtar"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/cuecontext"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/debug"
 	"cuelang.org/go/internal/core/eval"
+	"cuelang.org/go/internal/core/runtime"
 	"cuelang.org/go/internal/core/validate"
 	"cuelang.org/go/internal/cuetest"
 	"cuelang.org/go/internal/cuetxtar"
@@ -49,12 +51,12 @@ func TestEval(t *testing.T) {
 		test.ToDo = nil
 	}
 
-	r := cue.NewRuntime()
+	r := runtime.New()
 
 	test.Run(t, func(t *cuetxtar.Test) {
 		a := t.ValidInstances()
 
-		v, err := r.Build(a[0])
+		v, err := r.Build(nil, a[0])
 		if err != nil {
 			t.WriteErrors(err)
 			return
@@ -115,9 +117,9 @@ module: "example.com"
 		t.Fatal(instance.Err)
 	}
 
-	r := cue.NewRuntime()
+	r := runtime.New()
 
-	v, err := r.Build(instance)
+	v, err := r.Build(nil, instance)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,4 +136,18 @@ module: "example.com"
 	t.Error(debug.NodeString(r, v, nil))
 
 	t.Log(ctx.Stats())
+}
+
+func BenchmarkUnifyAPI(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		ctx := cuecontext.New()
+		v := ctx.CompileString("")
+		for j := 0; j < 500; j++ {
+			if j == 400 {
+				b.StartTimer()
+			}
+			v = v.FillPath(cue.ParsePath(fmt.Sprintf("i_%d", i)), i)
+		}
+	}
 }

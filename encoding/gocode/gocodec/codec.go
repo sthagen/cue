@@ -24,7 +24,8 @@ import (
 	"sync"
 
 	"cuelang.org/go/cue"
-	"cuelang.org/go/internal"
+	"cuelang.org/go/cue/cuecontext"
+	"cuelang.org/go/internal/value"
 )
 
 // Config has no options yet, but is defined for future extensibility.
@@ -34,7 +35,7 @@ type Config struct {
 // A Codec decodes and encodes CUE from and to Go values and validates and
 // completes Go values based on CUE templates.
 type Codec struct {
-	runtime *cue.Runtime
+	runtime *cue.Context
 	mutex   sync.RWMutex
 }
 
@@ -44,7 +45,7 @@ type Codec struct {
 // Runtime is not used elsewhere while using Codec. However, only the concurrent
 // use of Decode, Validate, and Complete is efficient.
 func New(r *cue.Runtime, c *Config) *Codec {
-	return &Codec{runtime: r}
+	return &Codec{runtime: value.ConvertToContext(r)}
 }
 
 // ExtractType extracts a CUE value from a Go type.
@@ -93,7 +94,7 @@ func (c *Codec) Encode(v cue.Value, x interface{}) error {
 	return v.Decode(x)
 }
 
-var defaultCodec = New(&cue.Runtime{}, nil)
+var defaultCodec = New(value.ConvertToRuntime(cuecontext.New()), nil)
 
 // Validate calls Validate on a default Codec for the type of x.
 func Validate(x interface{}) error {
@@ -125,7 +126,7 @@ func (c *Codec) Validate(v cue.Value, x interface{}) error {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	r := checkAndForkRuntime(c.runtime, v)
+	r := checkAndForkContext(c.runtime, v)
 	w, err := fromGoValue(r, x, false)
 	if err != nil {
 		return err
@@ -151,7 +152,7 @@ func (c *Codec) Complete(v cue.Value, x interface{}) error {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 
-	r := checkAndForkRuntime(c.runtime, v)
+	r := checkAndForkContext(c.runtime, v)
 	w, err := fromGoValue(r, x, true)
 	if err != nil {
 		return err
@@ -160,22 +161,26 @@ func (c *Codec) Complete(v cue.Value, x interface{}) error {
 	return w.Unify(v).Decode(x)
 }
 
-func fromGoValue(r *cue.Runtime, x interface{}, allowDefault bool) (cue.Value, error) {
-	v := internal.FromGoValue(r, x, allowDefault).(cue.Value)
+func fromGoValue(r *cue.Context, x interface{}, allowDefault bool) (cue.Value, error) {
+	v := value.FromGoValue(r, x, allowDefault)
 	if err := v.Err(); err != nil {
 		return v, err
 	}
 	return v, nil
 }
 
-func fromGoType(r *cue.Runtime, x interface{}) (cue.Value, error) {
-	v := internal.FromGoType(r, x).(cue.Value)
+func fromGoType(r *cue.Context, x interface{}) (cue.Value, error) {
+	v := value.FromGoType(r, x)
 	if err := v.Err(); err != nil {
 		return v, err
 	}
 	return v, nil
 }
 
-func checkAndForkRuntime(r *cue.Runtime, v cue.Value) *cue.Runtime {
-	return internal.CheckAndForkRuntime(r, v).(*cue.Runtime)
+func checkAndForkContext(r *cue.Context, v cue.Value) *cue.Context {
+	rr := v.Context()
+	if r != rr {
+		panic("value not from same runtime")
+	}
+	return rr
 }

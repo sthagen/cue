@@ -63,7 +63,7 @@ func TestAPI(t *testing.T) {
 			res := runSpec.Unify(v)
 			return res
 		},
-		want: "_|_(#runSpec: field ction not allowed)",
+		want: "_|_ // #runSpec: field ction not allowed",
 	}, {
 		// Issue #567
 		input: `
@@ -77,7 +77,7 @@ func TestAPI(t *testing.T) {
 			res := runSpec.Unify(v)
 			return res
 		},
-		want: "_|_(#runSpec.action: field Foo not allowed)",
+		want: "_|_ // #runSpec.action: field Foo not allowed",
 	}, {
 		input: `
 		#runSpec: v: {action: foo: int}
@@ -91,7 +91,7 @@ func TestAPI(t *testing.T) {
 			res := w.Unify(v)
 			return res
 		},
-		want: "_|_(w: field ction not allowed)",
+		want: "_|_ // w: field ction not allowed",
 	}}
 	for _, tc := range testCases {
 		if tc.skip {
@@ -691,7 +691,7 @@ func TestFields(t *testing.T) {
 		res:   "{a:1,b:2,c:3,}",
 	}, {
 		value: `{a:1,"_b":2,c:3,_d:4}`,
-		res:   "{a:1,_b:2,c:3,}",
+		res:   `{a:1,"_b":2,c:3,}`,
 	}, {
 		value: `{_a:"a"}`,
 		res:   "{}",
@@ -715,7 +715,7 @@ func TestFields(t *testing.T) {
 
 			buf := []byte{'{'}
 			for iter.Next() {
-				buf = append(buf, iter.Label()...)
+				buf = append(buf, iter.Selector().String()...)
 				buf = append(buf, ':')
 				b, err := iter.Value().MarshalJSON()
 				checkFatal(t, err, tc.err, "Obj.At")
@@ -819,7 +819,7 @@ v: #X
 	for _, tc := range testCases {
 		v := inst.Lookup(tc.ref...)
 
-		if got := fmt.Sprint(v); got != tc.raw {
+		if got := fmt.Sprintf("%#v", v); got != tc.raw {
 			t.Errorf("got %v; want %v", got, tc.raw)
 		}
 
@@ -841,7 +841,7 @@ v: #X
 			v = fi.Value
 		}
 
-		if got := fmt.Sprint(v); got != tc.raw {
+		if got := fmt.Sprintf("%#v", v); got != tc.raw {
 			t.Errorf("got %v; want %v", got, tc.raw)
 		}
 
@@ -956,21 +956,19 @@ func TestFill2(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := fmt.Sprint(root.Value())
-	want := `{
-	#Provider: {
-		ID:          string
+	got := fmt.Sprintf("%#v", root.Value())
+	want := `#Provider: {
+	ID:          string
+	notConcrete: bool
+	a:           int
+	b:           int
+}
+providers: {
+	myprovider: {
+		ID:          "12345"
 		notConcrete: bool
 		a:           int
 		b:           int
-	}
-	providers: {
-		myprovider: {
-			ID:          "12345"
-			notConcrete: bool
-			a:           int
-			b:           int
-		}
 	}
 }`
 	if got != want {
@@ -2799,7 +2797,7 @@ Another Foo.
 		})
 	}
 	want := "foobar defines at least foo.\n"
-	if got := docStr(inst.Doc()); got != want {
+	if got := docStr(inst.Value().Doc()); got != want {
 		t.Errorf("pkg: got:\n%vwant:\n%v", got, want)
 	}
 }

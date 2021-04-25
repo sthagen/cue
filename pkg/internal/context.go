@@ -21,12 +21,12 @@ import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/value"
 	"github.com/cockroachdb/apd/v2"
 )
 
 // CallCtxt is passed to builtin implementations that need to use a cue.Value. This is an internal type. It's interface may change.
 type CallCtxt struct {
-	src     adt.Expr
 	ctx     *adt.OpContext
 	builtin *Builtin
 	Err     interface{}
@@ -49,17 +49,17 @@ func (c *CallCtxt) Do() bool {
 }
 
 func (c *CallCtxt) Value(i int) cue.Value {
-	v := cue.MakeValue(c.ctx, c.args[i])
+	v := value.Make(c.ctx, c.args[i])
 	// TODO: remove default
 	// v, _ = v.Default()
 	if !v.IsConcrete() {
-		c.errcf(c.src, adt.IncompleteError, "non-concrete argument %d", i)
+		c.errcf(adt.IncompleteError, "non-concrete argument %d", i)
 	}
 	return v
 }
 
 func (c *CallCtxt) Struct(i int) *cue.Struct {
-	v := cue.MakeValue(c.ctx, c.args[i])
+	v := value.Make(c.ctx, c.args[i])
 	s, err := v.Struct()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "struct", err)
@@ -77,14 +77,14 @@ func (c *CallCtxt) Int64(i int) int64 { return int64(c.intValue(i, 64, "int64"))
 
 func (c *CallCtxt) intValue(i, bits int, typ string) int64 {
 	arg := c.args[i]
-	x := cue.MakeValue(c.ctx, arg)
+	x := value.Make(c.ctx, arg)
 	n, err := x.Int(nil)
 	if err != nil {
 		c.invalidArgType(arg, i, typ, err)
 		return 0
 	}
 	if n.BitLen() > bits {
-		c.errf(c.src, err, "int %s overflows %s in argument %d in call to %s",
+		c.errf(err, "int %s overflows %s in argument %d in call to %s",
 			n, typ, i, c.Name())
 	}
 	res, _ := x.Int64()
@@ -99,14 +99,14 @@ func (c *CallCtxt) Uint32(i int) uint32 { return uint32(c.uintValue(i, 32, "uint
 func (c *CallCtxt) Uint64(i int) uint64 { return uint64(c.uintValue(i, 64, "uint64")) }
 
 func (c *CallCtxt) uintValue(i, bits int, typ string) uint64 {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	n, err := x.Int(nil)
 	if err != nil || n.Sign() < 0 {
 		c.invalidArgType(c.args[i], i, typ, err)
 		return 0
 	}
 	if n.BitLen() > bits {
-		c.errf(c.src, err, "int %s overflows %s in argument %d in call to %s",
+		c.errf(err, "int %s overflows %s in argument %d in call to %s",
 			n, typ, i, c.Name())
 	}
 	res, _ := x.Uint64()
@@ -114,7 +114,7 @@ func (c *CallCtxt) uintValue(i, bits int, typ string) uint64 {
 }
 
 func (c *CallCtxt) Decimal(i int) *apd.Decimal {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	if _, err := x.MantExp(nil); err != nil {
 		c.invalidArgType(c.args[i], i, "Decimal", err)
 		return nil
@@ -123,7 +123,7 @@ func (c *CallCtxt) Decimal(i int) *apd.Decimal {
 }
 
 func (c *CallCtxt) Float64(i int) float64 {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	res, err := x.Float64()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "float64", err)
@@ -133,7 +133,7 @@ func (c *CallCtxt) Float64(i int) float64 {
 }
 
 func (c *CallCtxt) BigInt(i int) *big.Int {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	n, err := x.Int(nil)
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "int", err)
@@ -145,7 +145,7 @@ func (c *CallCtxt) BigInt(i int) *big.Int {
 var ten = big.NewInt(10)
 
 func (c *CallCtxt) BigFloat(i int) *big.Float {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	var mant big.Int
 	exp, err := x.MantExp(&mant)
 	if err != nil {
@@ -164,7 +164,7 @@ func (c *CallCtxt) BigFloat(i int) *big.Float {
 
 func (c *CallCtxt) String(i int) string {
 	// TODO: use Evaluate instead.
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	v, err := x.String()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "string", err)
@@ -174,7 +174,7 @@ func (c *CallCtxt) String(i int) string {
 }
 
 func (c *CallCtxt) Bytes(i int) []byte {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	v, err := x.Bytes()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "bytes", err)
@@ -184,7 +184,7 @@ func (c *CallCtxt) Bytes(i int) []byte {
 }
 
 func (c *CallCtxt) Reader(i int) io.Reader {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	// TODO: optimize for string and bytes cases
 	r, err := x.Reader()
 	if err != nil {
@@ -195,7 +195,7 @@ func (c *CallCtxt) Reader(i int) io.Reader {
 }
 
 func (c *CallCtxt) Bool(i int) bool {
-	x := cue.MakeValue(c.ctx, c.args[i])
+	x := value.Make(c.ctx, c.args[i])
 	b, err := x.Bool()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "bool", err)
@@ -206,7 +206,7 @@ func (c *CallCtxt) Bool(i int) bool {
 
 func (c *CallCtxt) List(i int) (a []cue.Value) {
 	arg := c.args[i]
-	x := cue.MakeValue(c.ctx, arg)
+	x := value.Make(c.ctx, arg)
 	v, err := x.List()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "list", err)
@@ -220,7 +220,7 @@ func (c *CallCtxt) List(i int) (a []cue.Value) {
 
 func (c *CallCtxt) Iter(i int) (a cue.Iterator) {
 	arg := c.args[i]
-	x := cue.MakeValue(c.ctx, arg)
+	x := value.Make(c.ctx, arg)
 	v, err := x.List()
 	if err != nil {
 		c.invalidArgType(c.args[i], i, "list", err)
@@ -273,13 +273,15 @@ func (c *CallCtxt) DecimalList(i int) (a []*apd.Decimal) {
 		default:
 			if k := w.Kind(); k&adt.NumKind == 0 {
 				err := c.ctx.NewErrf(
-					"invalid type element %d (%s) of number list argument %d", j, k, i)
+					"invalid list element %d in argument %d to call: cannot use value %s (%s) as number",
+					j, i, w, k)
 				c.Err = &callError{err}
 				return a
 			}
 
 			err := c.ctx.NewErrf(
-				"non-concrete number value for element %d of number list argument %d", j, i)
+				"non-concrete value %s for element %d of number list argument %d",
+				w, j, i)
 			err.Code = adt.IncompleteError
 			c.Err = &callError{err}
 			return nil
@@ -309,13 +311,15 @@ func (c *CallCtxt) StringList(i int) (a []string) {
 		default:
 			if k := w.Kind(); k&adt.StringKind == 0 {
 				err := c.ctx.NewErrf(
-					"invalid type element %d (%s) of string list argument %d", j, k, i)
+					"invalid list element %d in argument %d to call: cannot use value %s (%s) as string",
+					j, i, w, k)
 				c.Err = &callError{err}
 				return a
 			}
 
 			err := c.ctx.NewErrf(
-				"non-concrete string value for element %d of string list argument %d", j, i)
+				"non-concrete value %s for element %d of string list argument %d",
+				w, j, i)
 			err.Code = adt.IncompleteError
 			c.Err = &callError{err}
 			return nil

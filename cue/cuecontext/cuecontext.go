@@ -1,4 +1,4 @@
-// Copyright 2018 The CUE Authors
+// Copyright 2021 CUE Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,20 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cue
+package cuecontext
 
 import (
-	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/cue"
+	"cuelang.org/go/internal/core/runtime"
+
+	_ "cuelang.org/go/pkg"
 )
 
-func pos(n adt.Node) (p token.Pos) {
-	if n == nil {
-		return
-	}
-	src := n.Source()
-	if src == nil {
-		return
-	}
-	return src.Pos()
+// Option controls a build context.
+type Option interface{ buildOption() }
+
+// New creates a new Context.
+func New(options ...Option) *cue.Context {
+	r := runtime.New()
+	return (*cue.Context)(r)
 }

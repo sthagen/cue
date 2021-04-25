@@ -21,10 +21,25 @@ import (
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/compile"
-	"cuelang.org/go/internal/core/convert"
-	"cuelang.org/go/internal/core/eval"
 	"cuelang.org/go/internal/core/runtime"
 )
+
+// An InstanceOrValue is implemented by Value and *Instance.
+//
+// This is a placeholder type that is used to allow Instance-based APIs to
+// transition to Value-based APIs. The goals is to get rid of the Instance
+// type before v1.0.0.
+type InstanceOrValue interface {
+	Value() Value
+
+	internal()
+}
+
+func (Value) internal()     {}
+func (*Instance) internal() {}
+
+// Value implements value.Instance.
+func (v hiddenValue) Value() Value { return v }
 
 // An Instance defines a single configuration based on a collection of
 // underlying CUE files.
@@ -45,6 +60,8 @@ type Instance struct {
 
 	// complete bool // for cycle detection
 }
+
+type hiddenInstance = Instance
 
 func addInst(x *runtime.Runtime, p *Instance) *Instance {
 	if p.inst == nil {
@@ -173,15 +190,6 @@ func (inst *Instance) eval(ctx *adt.OpContext) adt.Value {
 	return v
 }
 
-func init() {
-	internal.EvalExpr = func(value, expr interface{}) interface{} {
-		v := value.(Value)
-		e := expr.(ast.Expr)
-		ctx := newContext(v.idx)
-		return newValueRoot(v.idx, ctx, evalExpr(ctx, v.v, e))
-	}
-}
-
 // pkgID reports a package path that can never resolve to a valid package.
 func pkgID() string {
 	return "_"
@@ -252,17 +260,10 @@ func (inst *Instance) ID() string {
 }
 
 // Doc returns the package comments for this instance.
-func (inst *Instance) Doc() []*ast.CommentGroup {
-	var docs []*ast.CommentGroup
-	if inst.inst == nil {
-		return nil
-	}
-	for _, f := range inst.inst.Files {
-		if c := internal.FileComment(f); c != nil {
-			docs = append(docs, c)
-		}
-	}
-	return docs
+//
+// Deprecated: use inst.Value().Doc()
+func (inst *hiddenInstance) Doc() []*ast.CommentGroup {
+	return inst.Value().Doc()
 }
 
 // Value returns the root value of the configuration. If the configuration
@@ -277,7 +278,7 @@ func (inst *Instance) Value() Value {
 // Eval evaluates an expression within an existing instance.
 //
 // Expressions may refer to builtin packages if they can be uniquely identified.
-func (inst *Instance) Eval(expr ast.Expr) Value {
+func (inst *hiddenInstance) Eval(expr ast.Expr) Value {
 	ctx := newContext(inst.index)
 	v := inst.root
 	v.Finalize(ctx)
@@ -312,7 +313,9 @@ func Merge(inst ...*Instance) *Instance {
 // Build creates a new instance from the build instances, allowing unbound
 // identifier to bind to the top-level field in inst. The top-level fields in
 // inst take precedence over predeclared identifier and builtin functions.
-func (inst *Instance) Build(p *build.Instance) *Instance {
+//
+// Deprecated: use Context.Build
+func (inst *hiddenInstance) Build(p *build.Instance) *Instance {
 	p.Complete()
 
 	idx := inst.index
@@ -351,14 +354,18 @@ func (inst *Instance) value() Value {
 // exist. The Err method reports if any error occurred during evaluation. The
 // empty path returns the top-level configuration struct. Use LookupDef for definitions or LookupField for
 // any kind of field.
-func (inst *Instance) Lookup(path ...string) Value {
+//
+// Deprecated: use Value.LookupPath
+func (inst *hiddenInstance) Lookup(path ...string) Value {
 	return inst.value().Lookup(path...)
 }
 
 // LookupDef reports the definition with the given name within struct v. The
 // Exists method of the returned value will report false if the definition did
 // not exist. The Err method reports if any error occurred during evaluation.
-func (inst *Instance) LookupDef(path string) Value {
+//
+// Deprecated: use Value.LookupPath
+func (inst *hiddenInstance) LookupDef(path string) Value {
 	return inst.value().LookupDef(path)
 }
 
@@ -369,7 +376,9 @@ func (inst *Instance) LookupDef(path string) Value {
 //
 // Deprecated: this API does not work with new-style definitions. Use
 // FieldByName defined on inst.Value().
-func (inst *Instance) LookupField(path ...string) (f FieldInfo, err error) {
+//
+// Deprecated: use Value.LookupPath
+func (inst *hiddenInstance) LookupField(path ...string) (f FieldInfo, err error) {
 	v := inst.value()
 	for _, k := range path {
 		s, err := v.Struct()
@@ -395,37 +404,19 @@ func (inst *Instance) LookupField(path ...string) (f FieldInfo, err error) {
 // Values may be any Go value that can be converted to CUE, an ast.Expr or
 // a Value. In the latter case, it will panic if the Value is not from the same
 // Runtime.
-func (inst *Instance) Fill(x interface{}, path ...string) (*Instance, error) {
-	for i := len(path) - 1; i >= 0; i-- {
-		x = map[string]interface{}{path[i]: x}
-	}
-	a := make([]adt.Conjunct, len(inst.root.Conjuncts))
-	copy(a, inst.root.Conjuncts)
-	u := &adt.Vertex{Conjuncts: a}
+//
+// Deprecated: use Value.FillPath()
+func (inst *hiddenInstance) Fill(x interface{}, path ...string) (*Instance, error) {
+	v := inst.Value().Fill(x, path...)
 
-	if v, ok := x.(Value); ok {
-		if inst.index != v.idx {
-			panic("value of type Value is not created with same Runtime as Instance")
-		}
-		for _, c := range v.v.Conjuncts {
-			u.AddConjunct(c)
-		}
-	} else {
-		ctx := eval.NewContext(inst.index, nil)
-		expr := convert.GoValueToExpr(ctx, true, x)
-		u.AddConjunct(adt.MakeRootConjunct(nil, expr))
-		u.Finalize(ctx)
-	}
 	inst = addInst(inst.index, &Instance{
-		root: u,
+		root: v.v,
 		inst: nil,
 
 		// Omit ImportPath to indicate this is not an importable package.
 		Dir:        inst.Dir,
 		PkgName:    inst.PkgName,
 		Incomplete: inst.Incomplete,
-
-		// complete: true,
 	})
 	return inst, nil
 }

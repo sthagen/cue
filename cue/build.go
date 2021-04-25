@@ -16,63 +16,34 @@ package cue
 
 import (
 	"cuelang.org/go/cue/ast"
-	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
-	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal"
+	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/runtime"
 )
 
-// A Runtime is used for creating CUE interpretations.
+// A Runtime is used for creating CUE Values.
 //
 // Any operation that involves two Values or Instances should originate from
 // the same Runtime.
 //
-// The zero value of a Runtime is ready to use.
-type Runtime struct {
-	idx *runtime.Runtime
+// The zero value of Runtime works for legacy reasons, but
+// should not be used. It may panic at some point.
+//
+// Deprecated: use Context.
+type Runtime runtime.Runtime
+
+func (r *Runtime) runtime() *runtime.Runtime {
+	rt := (*runtime.Runtime)(r)
+	rt.Init()
+	return rt
 }
 
-func init() {
-	internal.GetRuntime = func(instance interface{}) interface{} {
-		switch x := instance.(type) {
-		case Value:
-			return &Runtime{idx: x.idx}
+type hiddenRuntime = Runtime
 
-		case *Instance:
-			return &Runtime{idx: x.index}
-
-		default:
-			panic("argument must be Value or *Instance")
-		}
-	}
-
-	internal.CheckAndForkRuntime = func(runtime, value interface{}) interface{} {
-		r := runtime.(*Runtime)
-		idx := value.(Value).idx
-		if idx != r.idx {
-			panic("value not from same runtime")
-		}
-		return &Runtime{idx: newIndex()}
-	}
-}
-
-func dummyLoad(token.Pos, string) *build.Instance { return nil }
-
-func (r *Runtime) index() *runtime.Runtime {
-	if r.idx == nil {
-		r.idx = newIndex()
-	}
-	return r.idx
-}
-
-func (r *Runtime) complete(p *build.Instance) (*Instance, error) {
-	idx := r.index()
-	if err := p.Complete(); err != nil {
-		return nil, err
-	}
-	inst := loadInstance(idx, p)
+func (r *Runtime) complete(p *build.Instance, v *adt.Vertex) (*Instance, error) {
+	idx := r.runtime()
+	inst := getImportFromBuild(idx, p, v)
 	inst.ImportPath = p.ImportPath
 	if inst.Err != nil {
 		return nil, inst.Err
@@ -84,60 +55,64 @@ func (r *Runtime) complete(p *build.Instance) (*Instance, error) {
 // provided as a string, byte slice, io.Reader. The name is used as the file
 // name in position information. The source may import builtin packages. Use
 // Build to allow importing non-builtin packages.
-func (r *Runtime) Compile(filename string, source interface{}) (*Instance, error) {
-	ctx := build.NewContext()
-	p := ctx.NewInstance(filename, dummyLoad)
-	if err := p.AddFile(filename, source); err != nil {
-		return nil, p.Err
-	}
-	return r.complete(p)
+//
+// Deprecated: use Parse or ParseBytes. The use of Instance is being phased out.
+func (r *hiddenRuntime) Compile(filename string, source interface{}) (*Instance, error) {
+	cfg := &runtime.Config{Filename: filename}
+	v, p := r.runtime().Compile(cfg, source)
+	return r.complete(p, v)
 }
 
 // CompileFile compiles the given source file into an Instance. The source may
 // import builtin packages. Use Build to allow importing non-builtin packages.
-func (r *Runtime) CompileFile(file *ast.File) (*Instance, error) {
-	ctx := build.NewContext()
-	p := ctx.NewInstance(file.Filename, dummyLoad)
-	err := p.AddSyntax(file)
-	if err != nil {
-		return nil, err
-	}
-	_, p.PkgName, _ = internal.PackageInfo(file)
-	return r.complete(p)
+//
+// Deprecated: use BuildFile. The use of Instance is being phased out.
+func (r *hiddenRuntime) CompileFile(file *ast.File) (*Instance, error) {
+	v, p := r.runtime().CompileFile(nil, file)
+	return r.complete(p, v)
 }
 
 // CompileExpr compiles the given source expression into an Instance. The source
 // may import builtin packages. Use Build to allow importing non-builtin
 // packages.
-func (r *Runtime) CompileExpr(expr ast.Expr) (*Instance, error) {
-	f, err := astutil.ToFile(expr)
+//
+// Deprecated: use BuildExpr. The use of Instance is being phased out.
+func (r *hiddenRuntime) CompileExpr(expr ast.Expr) (*Instance, error) {
+	v, p, err := r.runtime().CompileExpr(nil, expr)
 	if err != nil {
 		return nil, err
 	}
-	return r.CompileFile(f)
+	return r.complete(p, v)
 }
 
-// Parse parses a CUE source value into a CUE Instance. The source code may
-// be provided as a string, byte slice, or io.Reader. The name is used as the
-// file name in position information. The source may import builtin packages.
+// Parse parses a CUE source value into a CUE Instance. The source code may be
+// provided as a string, byte slice, or io.Reader. The name is used as the file
+// name in position information. The source may import builtin packages.
 //
-// Deprecated: use Compile
-func (r *Runtime) Parse(name string, source interface{}) (*Instance, error) {
+// Deprecated: use ParseString or ParseBytes.  The use of Instance is being
+// phased out.
+func (r *hiddenRuntime) Parse(name string, source interface{}) (*Instance, error) {
 	return r.Compile(name, source)
 }
 
 // Build creates an Instance from the given build.Instance. A returned Instance
 // may be incomplete, in which case its Err field is set.
-func (r *Runtime) Build(instance *build.Instance) (*Instance, error) {
-	return r.complete(instance)
+//
+// Deprecated: use Context.BuildInstance. The use of Instance is being phased
+// out.
+func (r *hiddenRuntime) Build(p *build.Instance) (*Instance, error) {
+	v, _ := r.runtime().Build(nil, p)
+	return r.complete(p, v)
 }
 
-// Build creates one Instance for each build.Instance. A returned Instance
-// may be incomplete, in which case its Err field is set.
+// Build creates one Instance for each build.Instance. A returned Instance may
+// be incomplete, in which case its Err field is set.
 //
 // Example:
 //	inst := cue.Build(load.Instances(args))
 //
+// Deprecated: use Context.BuildInstances. The use of Instance is being phased
+// out.
 func Build(instances []*build.Instance) []*Instance {
 	if len(instances) == 0 {
 		panic("cue: list of instances must not be empty")
@@ -147,18 +122,16 @@ func Build(instances []*build.Instance) []*Instance {
 	return a
 }
 
-func (r *Runtime) build(instances []*build.Instance) ([]*Instance, error) {
-	index := r.index()
+func (r *hiddenRuntime) build(instances []*build.Instance) ([]*Instance, error) {
+	index := r.runtime()
 
 	loaded := []*Instance{}
 
 	var errs errors.Error
 
 	for _, p := range instances {
-		_ = p.Complete()
-		errs = errors.Append(errs, p.Err)
-
-		i := loadInstance(index, p)
+		v, _ := index.Build(nil, p)
+		i := getImportFromBuild(index, p, v)
 		errs = errors.Append(errs, i.Err)
 		loaded = append(loaded, i)
 	}
@@ -171,28 +144,12 @@ func (r *Runtime) build(instances []*build.Instance) ([]*Instance, error) {
 // Any references must be resolved beforehand.
 //
 // Deprecated: use CompileExpr
-func (r *Runtime) FromExpr(expr ast.Expr) (*Instance, error) {
+func (r *hiddenRuntime) FromExpr(expr ast.Expr) (*Instance, error) {
 	return r.CompileFile(&ast.File{
 		Decls: []ast.Decl{&ast.EmbedDecl{Expr: expr}},
 	})
 }
 
-// NewRuntime creates a *runtime.Runtime with builtins preloaded.
-func NewRuntime() *runtime.Runtime {
-	i := newIndex()
-	return i
-}
-
-// newIndex creates a new index.
-func newIndex() *runtime.Runtime {
-	return runtime.New()
-}
-
 func isBuiltin(s string) bool {
 	return runtime.SharedRuntime.IsBuiltinPackage(s)
-}
-
-func loadInstance(idx *runtime.Runtime, p *build.Instance) *Instance {
-	v, _ := idx.Build(p)
-	return getImportFromBuild(idx, p, v)
 }
