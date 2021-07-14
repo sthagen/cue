@@ -24,7 +24,6 @@ import (
 	"cuelang.org/go/cue/literal"
 	"cuelang.org/go/cue/scanner"
 	"cuelang.org/go/cue/token"
-	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/astinternal"
 )
 
@@ -402,7 +401,7 @@ func (p *parser) assertV0(pos token.Pos, minor, patch int, name string) {
 	if p.version != 0 && p.version > v {
 		p.errors = errors.Append(p.errors,
 			errors.Wrapf(&DeprecationError{v}, pos,
-				"%s deprecated as of v0.%d.%d", name, minor, patch+1))
+				"use of deprecated %s (deprecated as of v0.%d.%d)", name, minor, patch+1))
 	}
 }
 
@@ -747,6 +746,7 @@ func (p *parser) parseFieldList() (list []ast.Decl) {
 			p.next()
 			c.closeNode(p, ellipsis)
 			list = append(list, ellipsis)
+			p.consumeDeclComma()
 
 		default:
 			list = append(list, p.parseField())
@@ -754,15 +754,6 @@ func (p *parser) parseFieldList() (list []ast.Decl) {
 
 		// TODO: handle next comma here, after disallowing non-colon separator
 		// and we have eliminated the need comment positions.
-	}
-
-	if len(list) > 1 {
-		for _, d := range list {
-			if internal.IsBulkField(d) {
-				p.assertV0(p.pos, 2, 0, `combining bulk optional fields with other fields`)
-				break
-			}
-		}
 	}
 
 	return
@@ -846,79 +837,68 @@ func (p *parser) parseField() (decl ast.Decl) {
 	this := &ast.Field{Label: nil}
 	m := this
 
-	for i := 0; ; i++ {
-		tok := p.tok
+	tok := p.tok
 
-		label, expr, decl, ok := p.parseLabel(false)
-		if decl != nil {
-			return decl
+	label, expr, decl, ok := p.parseLabel(false)
+	if decl != nil {
+		return decl
+	}
+	m.Label = label
+
+	if !ok {
+		if expr == nil {
+			expr = p.parseRHS()
 		}
-		m.Label = label
-
-		if !ok {
-			if expr == nil {
-				expr = p.parseRHS()
-			}
-			if a, ok := expr.(*ast.Alias); ok {
-				if i > 0 {
-					p.errorExpected(p.pos, "label or ':'")
-					return &ast.BadDecl{From: pos, To: p.pos}
-				}
-				p.consumeDeclComma()
-				return a
-			}
-			e := &ast.EmbedDecl{Expr: expr}
+		if a, ok := expr.(*ast.Alias); ok {
+			p.assertV0(a.Pos(), 1, 3, `old-style alias; use "let X = expr" instead`)
 			p.consumeDeclComma()
-			return e
+			return a
 		}
+		e := &ast.EmbedDecl{Expr: expr}
+		p.consumeDeclComma()
+		return e
+	}
 
-		if p.tok == token.OPTION {
-			m.Optional = p.pos
-			p.next()
+	if p.tok == token.OPTION {
+		m.Optional = p.pos
+		p.next()
+	}
+
+	// TODO: consider disallowing comprehensions with more than one label.
+	// This can be a bit awkward in some cases, but it would naturally
+	// enforce the proper style that a comprehension be defined in the
+	// smallest possible scope.
+	// allowComprehension = false
+
+	switch p.tok {
+	case token.COLON, token.ISA:
+	case token.COMMA:
+		p.expectComma() // sync parser.
+		fallthrough
+
+	case token.RBRACE, token.EOF:
+		if a, ok := expr.(*ast.Alias); ok {
+			p.assertV0(a.Pos(), 1, 3, `old-style alias; use "let X = expr" instead`)
+			return a
 		}
-
-		if p.tok == token.COLON || p.tok == token.ISA {
-			break
+		switch tok {
+		case token.IDENT, token.LBRACK, token.LPAREN,
+			token.STRING, token.INTERPOLATION,
+			token.NULL, token.TRUE, token.FALSE,
+			token.FOR, token.IF, token.LET, token.IN:
+			return &ast.EmbedDecl{Expr: expr}
 		}
+		fallthrough
 
-		// TODO: consider disallowing comprehensions with more than one label.
-		// This can be a bit awkward in some cases, but it would naturally
-		// enforce the proper style that a comprehension be defined in the
-		// smallest possible scope.
-		// allowComprehension = false
-
-		switch p.tok {
-		case token.COMMA:
-			p.expectComma() // sync parser.
-			fallthrough
-
-		case token.RBRACE, token.EOF:
-			if i == 0 {
-				if a, ok := expr.(*ast.Alias); ok {
-					p.assertV0(p.pos, 1, 3, `old-style alias; use "let X = expr"`)
-
-					return a
-				}
-				switch tok {
-				case token.IDENT, token.LBRACK, token.LPAREN,
-					token.STRING, token.INTERPOLATION,
-					token.NULL, token.TRUE, token.FALSE,
-					token.FOR, token.IF, token.LET, token.IN:
-					return &ast.EmbedDecl{Expr: expr}
-				}
-			}
-			fallthrough
-
-		default:
-			p.errorExpected(p.pos, "label or ':'")
-			return &ast.BadDecl{From: pos, To: p.pos}
-		}
+	default:
+		p.errorExpected(p.pos, "label or ':'")
+		return &ast.BadDecl{From: pos, To: p.pos}
 	}
 
 	m.TokenPos = p.pos
 	m.Token = p.tok
 	if p.tok == token.ISA {
-		p.assertV0(p.pos, 2, 0, "use of '::'")
+		p.assertV0(p.pos, 2, 0, "'::'")
 	}
 	if p.tok != token.COLON && p.tok != token.ISA {
 		p.errorExpected(pos, "':' or '::'")
@@ -936,9 +916,6 @@ func (p *parser) parseField() (decl ast.Decl) {
 			if expr == nil {
 				expr = p.parseRHS()
 			}
-			if a, ok := expr.(*ast.Alias); ok {
-				p.errf(expr.Pos(), "alias %q not allowed as value", debugStr(a.Ident))
-			}
 			m.Value = expr
 			break
 		}
@@ -954,7 +931,7 @@ func (p *parser) parseField() (decl ast.Decl) {
 		m.TokenPos = p.pos
 		m.Token = p.tok
 		if p.tok == token.ISA {
-			p.assertV0(p.pos, 2, 0, "use of '::'")
+			p.assertV0(p.pos, 2, 0, "'::'")
 		}
 		if p.tok != token.COLON && p.tok != token.ISA {
 			if p.tok.IsLiteral() {
@@ -1194,25 +1171,6 @@ func (p *parser) parseList() (expr ast.Expr) {
 
 	elts := p.parseListElements()
 
-	if clauses, _ := p.parseComprehensionClauses(false); clauses != nil {
-		var expr ast.Expr
-		p.assertV0(p.pos, 1, 3, "old-style list comprehensions")
-		if len(elts) != 1 {
-			p.errf(lbrack.Add(1), "list comprehension must have exactly one element")
-		}
-		if len(elts) > 0 {
-			expr = elts[0]
-		}
-		rbrack := p.expectClosing(token.RBRACK, "list comprehension")
-
-		return &ast.ListComprehension{
-			Lbrack:  lbrack,
-			Expr:    expr,
-			Clauses: clauses,
-			Rbrack:  rbrack,
-		}
-	}
-
 	if p.tok == token.ELLIPSIS {
 		ellipsis := &ast.Ellipsis{
 			Ellipsis: p.pos,
@@ -1340,7 +1298,6 @@ func (p *parser) checkExpr(x ast.Expr) ast.Expr {
 	case *ast.Interpolation:
 	case *ast.StructLit:
 	case *ast.ListLit:
-	case *ast.ListComprehension:
 	case *ast.ParenExpr:
 		panic("unreachable")
 	case *ast.SelectorExpr:

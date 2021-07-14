@@ -35,6 +35,8 @@ func verifyArc2(ctx *OpContext, f Feature, v *Vertex, isClosed bool) (found bool
 	// TODO(perf): collect positions in error.
 	defer ctx.ReleasePositions(ctx.MarkPositions())
 
+	// Note: it is okay to use parent here as this only needs to be computed
+	// for the original location.
 	if ok, required := Accept(ctx, v.Parent, f); ok || (!required && !isClosed) {
 		return true, nil
 	}
@@ -57,5 +59,5 @@ func verifyArc2(ctx *OpContext, f Feature, v *Vertex, isClosed bool) (found bool
 	}
 
 	label := f.SelectorString(ctx)
-	return false, ctx.NewErrf("field %s not allowed", label)
+	return false, ctx.NewErrf("field not allowed: %s", label)
 }

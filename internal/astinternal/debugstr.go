@@ -108,14 +108,6 @@ func DebugStr(x interface{}) (out string) {
 		}
 		return out
 
-	case *ast.ListComprehension:
-		out := "["
-		out += DebugStr(v.Expr)
-		out += " "
-		out += DebugStr(v.Clauses)
-		out += "]"
-		return out
-
 	case *ast.ForClause:
 		out := "for "
 		if v.Key != nil {
@@ -157,12 +149,6 @@ func DebugStr(x interface{}) (out string) {
 
 	case *ast.Ident:
 		return v.Name
-
-	case *ast.TemplateLabel:
-		out := "<"
-		out += DebugStr(v.Ident)
-		out += ">"
-		return out
 
 	case *ast.SelectorExpr:
 		return DebugStr(v.X) + "." + DebugStr(v.Sel)

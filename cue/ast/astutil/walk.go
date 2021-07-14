@@ -95,9 +95,6 @@ func walk(v visitor, node ast.Node) {
 	case *ast.BottomLit, *ast.BadExpr, *ast.Ident, *ast.BasicLit:
 		// nothing to do
 
-	case *ast.TemplateLabel:
-		walk(v, n.Ident)
-
 	case *ast.Interpolation:
 		for _, e := range n.Elts {
 			walk(v, e)
@@ -176,12 +173,6 @@ func walk(v visitor, node ast.Node) {
 
 	case *ast.Package:
 		// The package identifier isn't really an identifier. Skip it.
-
-	case *ast.ListComprehension:
-		walk(v, n.Expr)
-		for _, c := range n.Clauses {
-			walk(v, c)
-		}
 
 	case *ast.LetClause:
 		walk(v, n.Ident)

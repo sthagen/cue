@@ -106,6 +106,14 @@ func MakePath(selectors ...Selector) Path {
 	return Path{path: selectors}
 }
 
+// pathToString is a utility function for creating debugging info.
+func pathToStrings(p Path) (a []string) {
+	for _, sel := range p.Selectors() {
+		a = append(a, sel.String())
+	}
+	return a
+}
+
 // ParsePath parses a CUE expression into a Path. Any error resulting from
 // this conversion can be obtained by calling Err on the result.
 //
@@ -148,8 +156,9 @@ func (p Path) String() string {
 	for i, sel := range p.path {
 		x := sel.sel
 		// TODO: use '.' in all cases, once supported.
+		_, isAny := x.(anySelector)
 		switch {
-		case x.kind() == adt.IntLabel:
+		case x.kind() == adt.IntLabel && !isAny:
 			b.WriteByte('[')
 			b.WriteString(x.String())
 			b.WriteByte(']')
@@ -419,7 +428,7 @@ func (s indexSelector) feature(r adt.Runtime) adt.Feature {
 // an anySelector represents a wildcard option of a particular type.
 type anySelector adt.Feature
 
-func (s anySelector) String() string        { return "_" }
+func (s anySelector) String() string        { return "[_]" }
 func (s anySelector) optional() bool        { return true }
 func (s anySelector) kind() adt.FeatureType { return adt.Feature(s).Typ() }
 

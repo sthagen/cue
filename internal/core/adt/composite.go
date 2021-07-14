@@ -438,7 +438,12 @@ func (v *Vertex) Err(c *OpContext, state VertexStatus) *Bottom {
 // func (v *Vertex) Evaluate()
 
 func (v *Vertex) Finalize(c *OpContext) {
+	// Saving and restoring the error context prevents v from panicking in
+	// case the caller did not handle existing errors in the context.
+	err := c.errs
+	c.errs = nil
 	c.Unify(v, Finalized)
+	c.errs = err
 }
 
 func (v *Vertex) AddErr(ctx *OpContext, b *Bottom) {
@@ -724,6 +729,8 @@ func (v *Vertex) AddStruct(s *StructLit, env *Environment, ci CloseInfo) *Struct
 
 // Path computes the sequence of Features leading from the root to of the
 // instance to this Vertex.
+//
+// NOTE: this is for debugging purposes only.
 func (v *Vertex) Path() []Feature {
 	return appendPath(nil, v)
 }

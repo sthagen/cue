@@ -136,7 +136,7 @@ func TestGenerated(t *testing.T) {
 
 			return n, nil
 		},
-		out: `<[l2// x: undefined field #Terminal] _|_>`,
+		out: `<[l2// x: undefined field: #Terminal] _|_>`,
 		p:   export.Final,
 	}, {
 		in: func(r *adt.OpContext) (adt.Expr, error) {
@@ -188,6 +188,20 @@ func TestGenerated(t *testing.T) {
 			return n, nil
 		},
 		out: `_#def, _#def: {c: string}`,
+		p:   export.All,
+	}, {
+		// Don't wrap in def if the if the value is an embedded scalar.
+		// Issue #977
+		in: func(r *adt.OpContext) (adt.Expr, error) {
+			v := ctx.CompileString(`
+					#A: { "foo", #enum: 2 }
+				`)
+			v = v.LookupPath(cue.ParsePath("#A"))
+
+			_, n := value.ToInternal(v)
+			return n, nil
+		},
+		out: `"foo", #enum: 2`,
 		p:   export.All,
 	}}
 	for _, tc := range testCases {

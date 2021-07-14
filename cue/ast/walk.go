@@ -100,9 +100,6 @@ func walk(v visitor, node Node) {
 	case *BottomLit, *BadExpr, *Ident, *BasicLit:
 		// nothing to do
 
-	case *TemplateLabel:
-		walk(v, n.Ident)
-
 	case *Interpolation:
 		for _, e := range n.Elts {
 			walk(v, e)
@@ -185,12 +182,6 @@ func walk(v visitor, node Node) {
 
 	case *Package:
 		walk(v, n.Name)
-
-	case *ListComprehension:
-		walk(v, n.Expr)
-		for _, c := range n.Clauses {
-			walk(v, c)
-		}
 
 	case *ForClause:
 		if n.Key != nil {

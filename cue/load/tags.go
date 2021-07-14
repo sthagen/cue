@@ -15,7 +15,13 @@
 package load
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"os"
+	"os/user"
+	"runtime"
 	"strings"
+	"time"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/ast"
@@ -26,6 +32,72 @@ import (
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/cli"
 )
+
+// A TagVar represents an injection variable.
+type TagVar struct {
+	// Func returns an ast for a tag variable. It is only called once
+	// per evaluation of a configuration.
+	Func func() (ast.Expr, error)
+
+	// Description documents this TagVar.
+	Description string
+}
+
+const rfc3339 = "2006-01-02T15:04:05.999999999Z"
+
+// DefaultTagVars creates a new map with a set of supported injection variables.
+func DefaultTagVars() map[string]TagVar {
+	return map[string]TagVar{
+		"now": {
+			Func: func() (ast.Expr, error) {
+				return ast.NewString(time.Now().UTC().Format(rfc3339)), nil
+			},
+		},
+		"os": {
+			Func: func() (ast.Expr, error) {
+				return ast.NewString(runtime.GOOS), nil
+			},
+		},
+		"cwd": {
+			Func: func() (ast.Expr, error) {
+				return varToString(os.Getwd())
+			},
+		},
+		"username": {
+			Func: func() (ast.Expr, error) {
+				u, err := user.Current()
+				return varToString(u.Username, err)
+			},
+		},
+		"hostname": {
+			Func: func() (ast.Expr, error) {
+				return varToString(os.Hostname())
+			},
+		},
+		"rand": {
+			Func: func() (ast.Expr, error) {
+				var b [16]byte
+				_, err := rand.Read(b[:])
+				if err != nil {
+					return nil, err
+				}
+				var hx [34]byte
+				hx[0] = '0'
+				hx[1] = 'x'
+				hex.Encode(hx[2:], b[:])
+				return ast.NewLit(token.INT, string(hx[:])), nil
+			},
+		},
+	}
+}
+
+func varToString(s string, err error) (ast.Expr, error) {
+	if err != nil {
+		return nil, err
+	}
+	x := ast.NewString(s)
+	return x, nil
+}
 
 // A tag binds an identifier to a field to allow passing command-line values.
 //
@@ -45,14 +117,17 @@ import (
 // mechanism that would assign different values to different fields based on the
 // same shorthand, duplicating functionality that is already available in CUE.
 type tag struct {
-	key        string
-	kind       cue.Kind
-	shorthands []string
+	key            string
+	kind           cue.Kind
+	shorthands     []string
+	vars           string // -T flag
+	hasReplacement bool
 
 	field *ast.Field
 }
 
-func parseTag(pos token.Pos, body string) (t tag, err errors.Error) {
+func parseTag(pos token.Pos, body string) (t *tag, err errors.Error) {
+	t = &tag{}
 	t.kind = cue.StringKind
 
 	a := internal.ParseAttrBody(pos, body)
@@ -85,27 +160,33 @@ func parseTag(pos token.Pos, body string) (t tag, err errors.Error) {
 		}
 	}
 
+	if s, ok, _ := a.Lookup(1, "var"); ok {
+		t.vars = s
+	}
+
 	return t, nil
 }
 
 func (t *tag) inject(value string, l *loader) errors.Error {
 	e, err := cli.ParseValue(token.NoPos, t.key, value, t.kind)
-	if err != nil {
-		return err
-	}
-	injected := ast.NewBinExpr(token.AND, t.field.Value, e)
+	t.injectValue(e, l)
+	return err
+}
+
+func (t *tag) injectValue(x ast.Expr, l *loader) {
+	injected := ast.NewBinExpr(token.AND, t.field.Value, x)
 	if l.replacements == nil {
 		l.replacements = map[ast.Node]ast.Node{}
 	}
 	l.replacements[t.field.Value] = injected
 	t.field.Value = injected
-	return nil
+	t.hasReplacement = true
 }
 
 // findTags defines which fields may be associated with tags.
 //
 // TODO: should we limit the depth at which tags may occur?
-func findTags(b *build.Instance) (tags []tag, errs errors.Error) {
+func findTags(b *build.Instance) (tags []*tag, errs errors.Error) {
 	findInvalidTags := func(x ast.Node, msg string) {
 		ast.Walk(x, nil, func(n ast.Node) {
 			if f, ok := n.(*ast.Field); ok {
@@ -190,27 +271,56 @@ func injectTags(tags []string, l *loader) errors.Error {
 			}
 		}
 	}
+
+	if l.cfg.TagVars != nil {
+		vars := map[string]ast.Expr{}
+
+		// Inject tag variables if the tag wasn't already set.
+		for _, t := range l.tags {
+			if t.hasReplacement || t.vars == "" {
+				continue
+			}
+			x, ok := vars[t.vars]
+			if !ok {
+				tv, ok := l.cfg.TagVars[t.vars]
+				if !ok {
+					return errors.Newf(token.NoPos,
+						"tag variable '%s' not found", t.vars)
+				}
+				tag, err := tv.Func()
+				if err != nil {
+					return errors.Wrapf(err, token.NoPos,
+						"error getting tag variable '%s'", t.vars)
+				}
+				x = tag
+				vars[t.vars] = tag
+			}
+			if x != nil {
+				t.injectValue(x, l)
+			}
+		}
+	}
 	return nil
 }
 
 // shouldBuildFile determines whether a File should be included based on its
 // attributes.
-func shouldBuildFile(f *ast.File, fp *fileProcessor) (bool, errors.Error) {
+func shouldBuildFile(f *ast.File, fp *fileProcessor) errors.Error {
 	tags := fp.c.Tags
 
 	a, errs := getBuildAttr(f)
 	if errs != nil {
-		return false, errs
+		return errs
 	}
 	if a == nil {
-		return true, nil
+		return nil
 	}
 
 	_, body := a.Split()
 
 	expr, err := parser.ParseExpr("", body)
 	if err != nil {
-		return false, errors.Promote(err, "")
+		return errors.Promote(err, "")
 	}
 
 	tagMap := map[string]bool{}
@@ -221,9 +331,12 @@ func shouldBuildFile(f *ast.File, fp *fileProcessor) (bool, errors.Error) {
 	c := checker{tags: tagMap, loader: fp.c.loader}
 	include := c.shouldInclude(expr)
 	if c.err != nil {
-		return false, c.err
+		return c.err
 	}
-	return include, nil
+	if !include {
+		return excludeError{errors.Newf(a.Pos(), "@if(%s) did not match", body)}
+	}
+	return nil
 }
 
 func getBuildAttr(f *ast.File) (*ast.Attribute, errors.Error) {

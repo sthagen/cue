@@ -15,6 +15,7 @@
 package pkg
 
 import (
+	_ "cuelang.org/go/pkg/crypto/hmac"
 	_ "cuelang.org/go/pkg/crypto/md5"
 	_ "cuelang.org/go/pkg/crypto/sha1"
 	_ "cuelang.org/go/pkg/crypto/sha256"
@@ -44,4 +45,5 @@ import (
 	_ "cuelang.org/go/pkg/tool/file"
 	_ "cuelang.org/go/pkg/tool/http"
 	_ "cuelang.org/go/pkg/tool/os"
+	_ "cuelang.org/go/pkg/uuid"
 )

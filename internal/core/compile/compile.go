@@ -26,12 +26,18 @@ import (
 	"cuelang.org/go/internal/core/adt"
 )
 
+// A Scope represents a nested scope of Vertices.
+type Scope interface {
+	Parent() Scope
+	Vertex() *adt.Vertex
+}
+
 // Config configures a compilation.
 type Config struct {
 	// Scope specifies a node in which to look up unresolved references. This
 	// is useful for evaluating expressions within an already evaluated
 	// configuration.
-	Scope *adt.Vertex
+	Scope Scope
 
 	// Imports allows unresolved identifiers to resolve to imports.
 	//
@@ -184,7 +190,7 @@ func (c *compiler) updateAlias(id *ast.Ident, expr adt.Expr) {
 }
 
 // lookupAlias looks up an alias with the given name at the k'th stack position.
-func (c compiler) lookupAlias(k int, id *ast.Ident) aliasEntry {
+func (c *compiler) lookupAlias(k int, id *ast.Ident) aliasEntry {
 	m := c.stack[k].aliases
 	name := id.Name
 	entry, ok := m[name]
@@ -267,8 +273,8 @@ func (c *compiler) compileFiles(a []*ast.File) *adt.Vertex { // Or value?
 	env := &adt.Environment{}
 	top := env
 
-	for p := c.Config.Scope; p != nil; p = p.Parent {
-		top.Vertex = p
+	for p := c.Config.Scope; p != nil; p = p.Parent() {
+		top.Vertex = p.Vertex()
 		top.Up = &adt.Environment{}
 		top = top.Up
 	}
@@ -290,8 +296,8 @@ func (c *compiler) compileExpr(x ast.Expr) adt.Conjunct {
 	env := &adt.Environment{}
 	top := env
 
-	for p := c.Config.Scope; p != nil; p = p.Parent {
-		top.Vertex = p
+	for p := c.Config.Scope; p != nil; p = p.Parent() {
+		top.Vertex = p.Vertex()
 		top.Up = &adt.Environment{}
 		top = top.Up
 	}
@@ -331,8 +337,8 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			}
 		}
 		upCount += c.upCountOffset
-		for p := c.Scope; p != nil; p = p.Parent {
-			for _, a := range p.Arcs {
+		for p := c.Scope; p != nil; p = p.Parent() {
+			for _, a := range p.Vertex().Arcs {
 				if a.Label == label {
 					return &adt.FieldReference{
 						Src:     n,
@@ -363,6 +369,7 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 
 	//   X in [X=x]: y  Scope: Field  Node: Expr (x)
 	//   X in X=[x]: y  Scope: Field  Node: Field
+	//   X in x: X=y    Scope: Field  Node: Alias
 	if f, ok := n.Scope.(*ast.Field); ok {
 		upCount := int32(0)
 
@@ -379,12 +386,21 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			UpCount: upCount,
 		}
 
-		if f, ok := n.Node.(*ast.Field); ok {
+		switch f := n.Node.(type) {
+		case *ast.Field:
 			_ = c.lookupAlias(k, f.Label.(*ast.Alias).Ident) // mark as used
 			return &adt.DynamicReference{
 				Src:     n,
 				UpCount: upCount,
 				Label:   label,
+			}
+
+		case *ast.Alias:
+			_ = c.lookupAlias(k, f.Ident) // mark as used
+			return &adt.ValueReference{
+				Src:     n,
+				UpCount: upCount,
+				Label:   c.label(f.Ident),
 			}
 		}
 		return label
@@ -408,29 +424,31 @@ func (c *compiler) resolve(n *ast.Ident) adt.Expr {
 			n.Name)
 	}
 
-	switch n.Node.(type) {
+	if n.Scope == nil {
+		// Package.
+		// Should have been handled above.
+		return c.errf(n, "unresolved identifier %v", n.Name)
+	}
+
+	switch f := n.Node.(type) {
 	// Local expressions
-	case *ast.LetClause, *ast.Alias:
+	case *ast.LetClause:
 		entry := c.lookupAlias(k, n)
 
+		// let x = y
 		return &adt.LetReference{
 			Src:     n,
 			UpCount: upCount,
 			Label:   label,
 			X:       entry.expr,
 		}
-	}
 
-	if n.Scope == nil {
-		// Package.
-		// Should have been handled above.
-		panic("unreachable") // Or direct ancestor node?
-	}
+	// TODO: handle new-style aliases
 
-	// X=x: y
-	// X=(x): y
-	// X="\(x)": y
-	if f, ok := n.Node.(*ast.Field); ok {
+	case *ast.Field:
+		// X=x: y
+		// X=(x): y
+		// X="\(x)": y
 		a, ok := f.Label.(*ast.Alias)
 		if !ok {
 			return c.errf(n, "illegal reference %s", n.Name)
@@ -507,12 +525,7 @@ func (c *compiler) markAlias(d ast.Decl) {
 		c.insertAlias(x.Ident, a)
 
 	case *ast.Alias:
-		a := aliasEntry{
-			label:   (*deprecatedAliasScope)(x),
-			srcExpr: x.Expr,
-			source:  x,
-		}
-		c.insertAlias(x.Ident, a)
+		c.errf(x, "old-style alias no longer supported: use let clause; use cue fix to update.")
 	}
 }
 
@@ -537,7 +550,16 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 			}
 		}
 
-		value := c.labeledExpr(x, (*fieldLabel)(x), x.Value)
+		v := x.Value
+		var value adt.Expr
+		if a, ok := v.(*ast.Alias); ok {
+			c.pushScope(nil, 0, a)
+			c.insertAlias(a.Ident, aliasEntry{source: a})
+			value = c.labeledExpr(x, (*fieldLabel)(x), a.Expr)
+			c.popScope()
+		} else {
+			value = c.labeledExpr(x, (*fieldLabel)(x), v)
+		}
 
 		switch l := lab.(type) {
 		case *ast.Ident, *ast.BasicLit:
@@ -609,7 +631,8 @@ func (c *compiler) decl(d ast.Decl) adt.Decl {
 		}
 
 	// Handled in addLetDecl.
-	case *ast.LetClause, *ast.Alias:
+	case *ast.LetClause:
+	// case: *ast.Alias: // TODO(value alias)
 
 	case *ast.CommentGroup:
 		// Nothing to do for a free-floating comment group.
@@ -648,9 +671,7 @@ func (c *compiler) addLetDecl(d ast.Decl) {
 		c.updateAlias(x.Ident, expr)
 
 	case *ast.Alias:
-		// TODO(legacy): deprecated, remove this use of Alias
-		expr := c.labeledExpr(nil, (*deprecatedAliasScope)(x), x.Expr)
-		c.updateAlias(x.Ident, expr)
+		c.errf(x, "old-style alias no longer supported: use let clause; use cue fix to update.")
 	}
 }
 

@@ -18,12 +18,20 @@ import (
 	"io/ioutil"
 	"path/filepath"
 	"strings"
-	"unicode"
 
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/cue/token"
 )
+
+var errExclude = errors.New("file rejected")
+
+type cueError = errors.Error
+type excludeError struct {
+	cueError
+}
+
+func (e excludeError) Is(err error) bool { return err == errExclude }
 
 // matchFile determines whether the file with the given name in the given directory
 // should be included in the package being constructed.
@@ -43,7 +51,7 @@ func matchFile(cfg *Config, file *build.File, returnImports, allFiles bool, allT
 	}
 
 	if file.Encoding != build.CUE {
-		return
+		return false, nil, nil // not a CUE file, don't record.
 	}
 
 	if file.Filename == "-" {
@@ -53,85 +61,33 @@ func matchFile(cfg *Config, file *build.File, returnImports, allFiles bool, allT
 			return
 		}
 		file.Source = b
-		data = b
-		match = true // don't check shouldBuild for stdin
-		return
+		return true, b, nil // don't check shouldBuild for stdin
 	}
 
 	name := filepath.Base(file.Filename)
 	if !cfg.filesMode && strings.HasPrefix(name, ".") {
-		return
+		return false, nil, &excludeError{
+			errors.Newf(token.NoPos, "filename starts with a '.'"),
+		}
 	}
 
 	if strings.HasPrefix(name, "_") {
-		return
+		return false, nil, &excludeError{
+			errors.Newf(token.NoPos, "filename starts with a '_"),
+		}
 	}
 
 	f, err := cfg.fileSystem.openFile(file.Filename)
 	if err != nil {
-		return
+		return false, nil, err
 	}
 
 	data, err = readImports(f, false, nil)
 	f.Close()
 	if err != nil {
-		err = errors.Newf(token.NoPos, "read %s: %v", file.Filename, err)
-		return
+		return false, nil,
+			errors.Newf(token.NoPos, "read %s: %v", file.Filename, err)
 	}
 
-	match = true
-	return
-}
-
-// doMatch reports whether the name is one of:
-//
-//	tag (if tag is listed in cfg.Build.BuildTags or cfg.Build.ReleaseTags)
-//	!tag (if tag is not listed in cfg.Build.BuildTags or cfg.Build.ReleaseTags)
-//	a comma-separated list of any of these
-//
-func doMatch(cfg *Config, name string, allTags map[string]bool) bool {
-	if name == "" {
-		if allTags != nil {
-			allTags[name] = true
-		}
-		return false
-	}
-	if i := strings.Index(name, ","); i >= 0 {
-		// comma-separated list
-		ok1 := doMatch(cfg, name[:i], allTags)
-		ok2 := doMatch(cfg, name[i+1:], allTags)
-		return ok1 && ok2
-	}
-	if strings.HasPrefix(name, "!!") { // bad syntax, reject always
-		return false
-	}
-	if strings.HasPrefix(name, "!") { // negation
-		return len(name) > 1 && !doMatch(cfg, name[1:], allTags)
-	}
-
-	if allTags != nil {
-		allTags[name] = true
-	}
-
-	// Tags must be letters, digits, underscores or dots.
-	// Unlike in CUE identifiers, all digits are fine (e.g., "386").
-	for _, c := range name {
-		if !unicode.IsLetter(c) && !unicode.IsDigit(c) && c != '_' && c != '.' {
-			return false
-		}
-	}
-
-	// other tags
-	for _, tag := range cfg.BuildTags {
-		if tag == name {
-			return true
-		}
-	}
-	for _, tag := range cfg.releaseTags {
-		if tag == name {
-			return true
-		}
-	}
-
-	return false
+	return true, data, nil
 }

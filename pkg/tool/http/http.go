@@ -18,6 +18,7 @@ package http
 //go:generate gofmt -s -w .
 
 import (
+	"bytes"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -52,6 +53,8 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 			if err != nil {
 				return nil, err
 			}
+		} else {
+			r = bytes.NewReader([]byte(""))
 		}
 		if header, err = parseHeaders(obj, "header"); err != nil {
 			return nil, err
@@ -83,9 +86,11 @@ func (c *httpCmd) Run(ctx *task.Context) (res interface{}, err error) {
 	// parse response body and headers
 	return map[string]interface{}{
 		"response": map[string]interface{}{
-			"body":    string(b),
-			"header":  resp.Header,
-			"trailer": resp.Trailer,
+			"status":     resp.Status,
+			"statusCode": resp.StatusCode,
+			"body":       string(b),
+			"header":     resp.Header,
+			"trailer":    resp.Trailer,
 		},
 	}, err
 }

@@ -54,16 +54,19 @@ type ErrFunc func(pos token.Pos, msg string, args ...interface{})
 // Let Clause             File/Struct    LetClause
 // Alias declaration      File/Struct    Alias (deprecated)
 // Illegal Reference      File/Struct
+// Value
+//   X in a: X=y          Field          Alias
 // Fields
 //   X in X: y            File/Struct    Expr (y)
 //   X in X=x: y          File/Struct    Field
+//   X in X=(x): y        File/Struct    Field
 //   X in X="\(x)": y     File/Struct    Field
 //   X in [X=x]: y        Field          Expr (x)
 //   X in X=[x]: y        Field          Field
 //
-// for k, v in            Field          ForClause
+// for k, v in            ForClause      Ident
+// let x = y              LetClause      Ident
 //
-// Template               Field          Template
 // Fields inside lambda
 //    Label               Field          Expr
 //    Value               Field          Field
@@ -122,28 +125,23 @@ func newScope(f *ast.File, outer *scope, node ast.Node, decls []ast.Decl) *scope
 			if a, ok := x.Label.(*ast.Alias); ok {
 				// TODO(legacy): use name := a.Ident.Name once quoted
 				// identifiers are no longer supported.
-				if name, _, _ := ast.LabelName(a.Ident); name != "" {
-					s.insert(name, x, a)
-				}
 				label, _ = a.Expr.(ast.Label)
-			}
-
-			switch y := label.(type) {
-			// TODO: support *ast.ParenExpr?
-			case *ast.ListLit:
-				// In this case, it really should be scoped like a template.
-				if len(y.Elts) != 1 {
-					break
-				}
-				if a, ok := y.Elts[0].(*ast.Alias); ok {
-					s.insert(a.Ident.Name, x, a)
+				if name, _, _ := ast.LabelName(a.Ident); name != "" {
+					if _, ok := label.(*ast.ListLit); !ok {
+						s.insert(name, x, a)
+					}
 				}
 			}
 
 			// default:
 			name, isIdent, _ := ast.LabelName(label)
 			if isIdent {
-				s.insert(name, x.Value, x)
+				v := x.Value
+				// Avoid interpreting value aliases at this point.
+				if a, ok := v.(*ast.Alias); ok {
+					v = a.Expr
+				}
+				s.insert(name, v, x)
 			}
 		case *ast.LetClause:
 			name, isIdent, _ := ast.LabelName(x.Ident)
@@ -269,9 +267,8 @@ func (s *scope) Before(n ast.Node) (w visitor) {
 
 	case *ast.Comprehension:
 		s = scopeClauses(s, x.Clauses)
-
-	case *ast.ListComprehension:
-		s = scopeClauses(s, x.Clauses)
+		walk(s, x.Value)
+		return nil
 
 	case *ast.Field:
 		var n ast.Node = x.Label
@@ -326,18 +323,18 @@ func (s *scope) Before(n ast.Node) (w visitor) {
 				}
 			})
 			walk(s, expr)
-
-		case *ast.TemplateLabel:
-			s = newScope(s.file, s, x, nil)
-			name, err := ast.ParseIdent(label.Ident)
-			if err == nil {
-				s.insert(name, x.Label, x) // Field used for entire lambda.
-			}
 		}
 
-		if x.Value != nil {
+		if n := x.Value; n != nil {
+			if alias, ok := x.Value.(*ast.Alias); ok {
+				// TODO: this should move into Before once decl attributes
+				// have been fully deprecated and embed attributes are introduced.
+				s = newScope(s.file, s, x, nil)
+				s.insert(alias.Ident.Name, alias, x)
+				n = alias.Expr
+			}
 			s.inField = true
-			walk(s, x.Value)
+			walk(s, n)
 			s.inField = false
 		}
 

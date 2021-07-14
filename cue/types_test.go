@@ -28,7 +28,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 
 	"cuelang.org/go/cue/ast"
-	"cuelang.org/go/cue/errors"
 	"cuelang.org/go/internal/astinternal"
 	"cuelang.org/go/internal/core/adt"
 	"cuelang.org/go/internal/core/debug"
@@ -63,7 +62,7 @@ func TestAPI(t *testing.T) {
 			res := runSpec.Unify(v)
 			return res
 		},
-		want: "_|_ // #runSpec: field ction not allowed",
+		want: "_|_ // #runSpec: field not allowed: ction",
 	}, {
 		// Issue #567
 		input: `
@@ -77,7 +76,7 @@ func TestAPI(t *testing.T) {
 			res := runSpec.Unify(v)
 			return res
 		},
-		want: "_|_ // #runSpec.action: field Foo not allowed",
+		want: "_|_ // #runSpec.action: field not allowed: Foo",
 	}, {
 		input: `
 		#runSpec: v: {action: foo: int}
@@ -91,7 +90,7 @@ func TestAPI(t *testing.T) {
 			res := w.Unify(v)
 			return res
 		},
-		want: "_|_ // w: field ction not allowed",
+		want: "_|_ // w: field not allowed: ction",
 	}}
 	for _, tc := range testCases {
 		if tc.skip {
@@ -1135,6 +1134,49 @@ func TestFillPath(t *testing.T) {
 		`,
 		x:   ast.NewIdent("#foo"),
 		out: `{1, #foo: 1}`,
+	}, {
+		in:   `[...int]`,
+		x:    1,
+		path: ParsePath("0"),
+		out:  `[1]`,
+	}, {
+		in:   `[1, ...int]`,
+		x:    1,
+		path: ParsePath("1"),
+		out:  `[1, 1]`,
+	}, {
+		in:   `a: {b: v: int, c: v: int}`,
+		x:    1,
+		path: MakePath(Str("a"), AnyString, Str("v")),
+		out: `{
+	a: {
+		b: {
+			v: 1
+		}
+		c: {
+			v: 1
+		}
+	}
+}`,
+	}, {
+		in:   `a: [_]`,
+		x:    1,
+		path: MakePath(Str("a"), AnyIndex, Str("b")),
+		out: `{
+	a: [{
+		b: 1
+	}]
+}`,
+	}, {
+		in:   `a: 1`,
+		x:    1,
+		path: MakePath(Str("b").Optional()),
+		out:  `{a: 1}`,
+	}, {
+		in:   `b: int`,
+		x:    1,
+		path: MakePath(Str("b").Optional()),
+		out:  `{b: 1}`,
 	}}
 
 	for _, tc := range testCases {
@@ -1147,6 +1189,40 @@ func TestFillPath(t *testing.T) {
 			if !cmp.Equal(goValue(v), goValue(w)) {
 				t.Error(cmp.Diff(goValue(v), goValue(w)))
 				t.Errorf("\ngot:  %s\nwant: %s", v, w)
+			}
+		})
+	}
+}
+
+func TestFillPathError(t *testing.T) {
+	r := &Runtime{}
+
+	type key struct{ a int }
+
+	testCases := []struct {
+		in   string
+		x    interface{}
+		path Path
+		err  string
+	}{{
+		// unsupported type.
+		in:  `_`,
+		x:   make(chan int),
+		err: "unsupported Go type (chan int)",
+	}}
+
+	for _, tc := range testCases {
+		t.Run("", func(t *testing.T) {
+			v := compileT(t, r, tc.in).Value()
+			v = v.FillPath(tc.path, tc.x)
+
+			err := v.Err()
+			if err == nil {
+				t.Errorf("unexpected success")
+			}
+
+			if got := err.Error(); !strings.Contains(got, tc.err) {
+				t.Errorf("\ngot:  %s\nwant: %s", got, tc.err)
 			}
 		})
 	}
@@ -1977,80 +2053,6 @@ func TestEquals(t *testing.T) {
 	}
 }
 
-func TestDecode(t *testing.T) {
-	type fields struct {
-		A int `json:"A"`
-		B int `json:"B"`
-		C int `json:"C"`
-	}
-	intList := func(ints ...int) *[]int {
-		ints = append([]int{}, ints...)
-		return &ints
-	}
-	testCases := []struct {
-		value string
-		dst   interface{}
-		want  interface{}
-		err   string
-	}{{
-		value: `_|_`,
-		err:   "explicit error (_|_ literal) in source",
-	}, {
-		value: `"str"`,
-		dst:   new(string),
-		want:  "str",
-	}, {
-		value: `"str"`,
-		dst:   new(int),
-		err:   "cannot unmarshal string into Go value of type int",
-	}, {
-		value: `{}`,
-		dst:   &fields{},
-		want:  fields{},
-	}, {
-		value: `{a:1,b:2,c:3}`,
-		dst:   &fields{},
-		want:  fields{A: 1, B: 2, C: 3},
-	}, {
-		value: `{for k, v in y if v > 1 {"\(k)": v} }
-		y: {a:1,b:2,c:3}`,
-		dst:  &fields{},
-		want: fields{B: 2, C: 3},
-	}, {
-		value: `{a:1,b:2,c:int}`,
-		dst:   new(fields),
-		err:   "cannot convert incomplete value",
-	}, {
-		value: `[]`,
-		dst:   intList(),
-		want:  *intList(),
-	}, {
-		value: `[1,2,3]`,
-		dst:   intList(),
-		want:  *intList(1, 2, 3),
-	}, {
-		value: `[for x in #y if x > 1 { x }]
-				#y: [1,2,3]`,
-		dst:  intList(),
-		want: *intList(2, 3),
-	}, {
-		value: `[int]`,
-		err:   "cannot convert incomplete value",
-	}}
-	for _, tc := range testCases {
-		t.Run(tc.value, func(t *testing.T) {
-			err := getInstance(t, tc.value).Value().Decode(tc.dst)
-			checkFatal(t, err, tc.err, "init")
-
-			got := reflect.ValueOf(tc.dst).Elem().Interface()
-			if !cmp.Equal(got, tc.want) {
-				t.Error(cmp.Diff(got, tc.want))
-				t.Errorf("\n%#v\n%#v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TODO: options: disallow cycles.
 func TestValidate(t *testing.T) {
 	testCases := []struct {
@@ -2246,7 +2248,7 @@ func TestPath(t *testing.T) {
 					v = v.Lookup(e)
 				}
 			}
-			got := v.appendPath(nil)
+			got := pathToStrings(v.Path())
 			if !reflect.DeepEqual(got, tc) {
 				t.Errorf("got %v; want %v", got, tc)
 			}
@@ -2334,335 +2336,6 @@ func cmpError(a, b error) bool {
 		return a == nil
 	}
 	return a.Error() == b.Error()
-}
-
-func TestAttributes(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,c,d=1) @foo(a,,d=1)
-	}
-	b: {
-		@embed(foo)
-		3
-	} @field(foo)
-
-	`
-
-	testCases := []struct {
-		flags AttrKind
-		path  string
-		out   string
-	}{{
-		flags: FieldAttr,
-		path:  "a.a",
-		out:   "[@foo(a,b,c=1)]",
-	}, {
-		flags: FieldAttr,
-		path:  "a.b",
-		out:   "[@bar(a,b,c,d=1) @foo(a,,d=1)]",
-	}, {
-		flags: DeclAttr,
-		path:  "b",
-		out:   "[@embed(foo)]",
-	}, {
-		flags: FieldAttr,
-		path:  "b",
-		out:   "[@field(foo)]",
-	}, {
-		flags: ValueAttr,
-		path:  "b",
-		out:   "[@field(foo) @embed(foo)]",
-	}}
-	for _, tc := range testCases {
-		t.Run("", func(t *testing.T) {
-			v := getInstance(t, config).Value().LookupPath(ParsePath(tc.path))
-			a := v.Attributes(tc.flags)
-			got := fmt.Sprint(a)
-			if got != tc.out {
-				t.Errorf("got %v; want %v", got, tc.out)
-			}
-
-		})
-	}
-}
-
-func TestAttributeErr(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,c,d=1) @foo(a,,d=1)
-	}
-	`
-	testCases := []struct {
-		path string
-		attr string
-		err  error
-	}{{
-		path: "a",
-		attr: "foo",
-		err:  nil,
-	}, {
-		path: "a",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "xx",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "e",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}}
-	for _, tc := range testCases {
-		t.Run(tc.path+"-"+tc.attr, func(t *testing.T) {
-			v := getInstance(t, config).Value().Lookup("a", tc.path)
-			a := v.Attribute(tc.attr)
-			err := a.Err()
-			if !cmpError(err, tc.err) {
-				t.Errorf("got %v; want %v", err, tc.err)
-			}
-		})
-	}
-}
-
-func TestAttributeString(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,c,d=1) @foo(a,,d=1)
-	}
-	`
-	testCases := []struct {
-		path string
-		attr string
-		pos  int
-		str  string
-		err  error
-	}{{
-		path: "a",
-		attr: "foo",
-		pos:  0,
-		str:  "a",
-	}, {
-		path: "a",
-		attr: "foo",
-		pos:  2,
-		str:  "c=1",
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  3,
-		str:  "d=1",
-	}, {
-		path: "e",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  4,
-		err:  errors.New("field does not exist"),
-	}}
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s.%s:%d", tc.path, tc.attr, tc.pos), func(t *testing.T) {
-			v := getInstance(t, config).Value().Lookup("a", tc.path)
-			a := v.Attribute(tc.attr)
-			got, err := a.String(tc.pos)
-			if !cmpError(err, tc.err) {
-				t.Errorf("err: got %v; want %v", err, tc.err)
-			}
-			if got != tc.str {
-				t.Errorf("str: got %v; want %v", got, tc.str)
-			}
-		})
-	}
-}
-
-func TestAttributeInt(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(1,3,c=1)
-		b: 1 @bar(a,-4,c,d=1) @foo(a,,d=1)
-	}
-	`
-	testCases := []struct {
-		path string
-		attr string
-		pos  int
-		val  int64
-		err  error
-	}{{
-		path: "a",
-		attr: "foo",
-		pos:  0,
-		val:  1,
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  1,
-		val:  -4,
-	}, {
-		path: "e",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  4,
-		err:  errors.New("field does not exist"),
-	}, {
-		path: "a",
-		attr: "foo",
-		pos:  2,
-		err:  errors.New(`strconv.ParseInt: parsing "c=1": invalid syntax`),
-	}}
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s.%s:%d", tc.path, tc.attr, tc.pos), func(t *testing.T) {
-			v := getInstance(t, config).Value().Lookup("a", tc.path)
-			a := v.Attribute(tc.attr)
-			got, err := a.Int(tc.pos)
-			if !cmpError(err, tc.err) {
-				t.Errorf("err: got %v; want %v", err, tc.err)
-			}
-			if got != tc.val {
-				t.Errorf("val: got %v; want %v", got, tc.val)
-			}
-		})
-	}
-}
-
-func TestAttributeFlag(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,c,d=1) @foo(a,,d=1)
-	}
-	`
-	testCases := []struct {
-		path string
-		attr string
-		pos  int
-		flag string
-		val  bool
-		err  error
-	}{{
-		path: "a",
-		attr: "foo",
-		pos:  0,
-		flag: "a",
-		val:  true,
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  1,
-		flag: "a",
-		val:  false,
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  0,
-		flag: "c",
-		val:  true,
-	}, {
-		path: "e",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  4,
-		err:  errors.New("field does not exist"),
-	}}
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s.%s:%d", tc.path, tc.attr, tc.pos), func(t *testing.T) {
-			v := getInstance(t, config).Value().Lookup("a", tc.path)
-			a := v.Attribute(tc.attr)
-			got, err := a.Flag(tc.pos, tc.flag)
-			if !cmpError(err, tc.err) {
-				t.Errorf("err: got %v; want %v", err, tc.err)
-			}
-			if got != tc.val {
-				t.Errorf("val: got %v; want %v", got, tc.val)
-			}
-		})
-	}
-}
-
-func TestAttributeLookup(t *testing.T) {
-	const config = `
-	a: {
-		a: 0 @foo(a,b,c=1)
-		b: 1 @bar(a,b,e =-5,d=1) @foo(a,,d=1)
-	}
-	`
-	testCases := []struct {
-		path string
-		attr string
-		pos  int
-		key  string
-		val  string
-		err  error
-	}{{
-		path: "a",
-		attr: "foo",
-		pos:  0,
-		key:  "c",
-		val:  "1",
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  1,
-		key:  "a",
-		val:  "",
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  0,
-		key:  "e",
-		val:  "-5",
-	}, {
-		path: "b",
-		attr: "bar",
-		pos:  0,
-		key:  "d",
-		val:  "1",
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  2,
-		key:  "d",
-		val:  "1",
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  2,
-		key:  "f",
-		val:  "",
-	}, {
-		path: "e",
-		attr: "bar",
-		err:  errors.New(`attribute "bar" does not exist`),
-	}, {
-		path: "b",
-		attr: "foo",
-		pos:  4,
-		err:  errors.New("field does not exist"),
-	}}
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("%s.%s:%d", tc.path, tc.attr, tc.pos), func(t *testing.T) {
-			v := getInstance(t, config).Value().Lookup("a", tc.path)
-			a := v.Attribute(tc.attr)
-			got, _, err := a.Lookup(tc.pos, tc.key)
-			if !cmpError(err, tc.err) {
-				t.Errorf("err: got %v; want %v", err, tc.err)
-			}
-			if got != tc.val {
-				t.Errorf("val: got %v; want %v", got, tc.val)
-			}
-		})
-	}
 }
 
 // TODO: duplicate docs.
@@ -2994,7 +2667,7 @@ func TestWalk(t *testing.T) {
 	}, {
 		value: `(a.b)
 			a: {}`,
-		out: `_|_(undefined field b)`,
+		out: `_|_(undefined field: b)`,
 	}, {
 		value: `true`,
 		out:   `true`,
@@ -3451,6 +3124,16 @@ func TestPathCorrection(t *testing.T) {
 			if gotPath != tc.want {
 				t.Errorf("got path %s; want %s", gotPath, tc.want)
 			}
+
+			x, p := v.ReferencePath()
+			if x.Value() != inst.Value() {
+				t.Error("reference not in original instance")
+			}
+			gotPath = p.String()
+			if gotPath != tc.want {
+				t.Errorf("got path %s; want %s", gotPath, tc.want)
+			}
+
 		})
 	}
 }
@@ -3648,14 +3331,33 @@ func TestExpr(t *testing.T) {
 		input: `v: "Hello, \(x)! Welcome to \(place)", place: string, x: string`,
 		want:  `\()("Hello, " .(〈〉 "x") "! Welcome to " .(〈〉 "place") "")`,
 	}, {
+		// Split out the reference, but ensure the split-off outer struct
+		// remains valid.
+		input: `v: { a, #b: 1 }, a: 2`,
+		want:  `&(.(〈〉 "a") {int,#b:1})`,
+	}, {
+		// Result is an error, no need to split off.
 		input: `v: { a, b: 1 }, a: 2`,
 		want:  `&(.(〈〉 "a") {b:1})`,
+	}, {
+		// Don't split of concrete values.
+		input: `v: { "foo", #def: 1 }`,
+		want:  `{"foo",#def:1}`,
+	}, {
+		input: `v: { {} | { a: #A, b: #B}, #A: {} | { c: int} }, #B: int | bool`,
+		want:  `&(|({} {a:#A,b:#B}) {#A:({}|{c:int})})`,
 	}, {
 		input: `v: { {c: a}, b: a }, a: int`,
 		want:  `&({c:a} {b:a})`,
 	}, {
 		input: `v: [...number] | *[1, 2, 3]`,
 		want:  `([...number]|*[1,2,3])`,
+	}, {
+		input: `v: or([1, 2, 3])`,
+		want:  `|(1 2 3)`,
+	}, {
+		input: `v: and([1, 2, 3])`,
+		want:  `&(1 2 3)`,
 	}}
 	for _, tc := range testCases {
 		t.Run(tc.input, func(t *testing.T) {

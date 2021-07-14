@@ -166,6 +166,7 @@ the token stream immediately after a line's final token if that token is
 - an identifier, keyword, or bottom
 - a number or string literal, including an interpolation
 - one of the characters `)`, `]`, `}`, or `?`
+- an ellipsis `...`
 
 
 Although commas are automatically inserted, the parser will require
@@ -829,7 +830,7 @@ float | *1                       1
 
 ### Bottom and errors
 
-Any evaluation error in CUE results in a bottom value, respresented by
+Any evaluation error in CUE results in a bottom value, represented by
 the token `_|_`.
 Bottom is an instance of every other value.
 Any evaluation error is represented as bottom.
@@ -1163,7 +1164,7 @@ StructLit       = "{" { Declaration "," } "}" .
 Declaration     = Field | Ellipsis | Embedding | LetClause | attribute .
 Ellipsis        = "..." [ Expression ] .
 Embedding       = Comprehension | AliasExpr .
-Field           = Label ":" { Label ":" } Expression { attribute } .
+Field           = Label ":" { Label ":" } AliasExpr { attribute } .
 Label           = [ identifier "=" ] LabelExpr .
 LabelExpr       = LabelName [ "?" ] | "[" AliasExpr "]" .
 LabelName       = identifier | simple_string_lit  .
@@ -1472,7 +1473,7 @@ within the [scope](#declarations-and-scopes) in which they are declared.
 The name of an alias must be unique within its scope.
 
 ```
-AliasExpr  = Expression | identifier "=" Expression .
+AliasExpr  = [ identifier "=" ] Expression .
 ```
 
 Aliases can appear in several positions:
@@ -1492,6 +1493,10 @@ In front of a Label (`X=label: value`):
 - for optional fields (`foo?: bar` and `[foo]: bar`),
   the bound identifier is only visible within the field value (`bar`).
 
+Before a value (`foo: X=x`)
+
+- binds the identifier to the value it precedes within the scope of that value.
+
 Inside a bracketed label (`[X=expr]: value`):
 
 - binds the identifier to the the concrete label that matches `expr`
@@ -1508,13 +1513,13 @@ Before a list element (`[ X=value, X+1 ]`) (Not yet implemented)
 -->
 
 ```
-// An alias declaration
-Alias = 3
-a: Alias  // 3
-
 // A field alias
 foo: X  // 4
 X="not an identifier": 4
+
+// A value alias
+foo: X={x: X.a}
+bar: foo & {a: 1}  // {a: 1, x: 1}
 
 // A label alias
 [Y=string]: { name: Y }
@@ -1891,33 +1896,6 @@ e: c.greeting  // "Hello, you!"
 
 Primary expressions are the operands for unary and binary expressions.
 
-
-```
-
-Slice: indices must be complete
-([0, 1, 2, 3] | [2, 3])[0:2]   => [0, 1] | [2, 3]
-
-([0, 1, 2, 3] | *[2, 3])[0:2]   => [0, 1] | [2, 3]
-([0,1,2,3]|[2,3], [2,3])[0:2]   => ([0,1]|[2,3], [2,3])
-
-Index
-a: (1|2, 1)
-b: ([0,1,2,3]|[2,3], [2,3])[a]   => ([0,1,2,3]|[2,3][a], 3)
-
-Binary operation
-A binary is only evaluated if its operands are complete.
-
-Input          Maximum allowed evaluation
-a: string      string
-b: 2           2
-c: a * b       a * 2
-
-An error in a struct is if the evaluation of any expression results in
-bottom, where an incomplete expression is not considered bottom.
-```
-<!-- TODO(mpvl)
-	Conversion |
--->
 ```
 PrimaryExpr =
 	Operand |
@@ -1958,7 +1936,6 @@ x
 (s + ".txt")
 f(3.1415, true)
 m["foo"]
-s[i : j + 1]
 obj.color
 f.p[i].x
 ```
@@ -1996,7 +1973,7 @@ If `x` is a package name, see the section on [qualified identifiers](#qualified-
 
 <!--
 TODO: consider allowing this and also for selectors. It needs to be considered
-how defaults are corried forward in cases like:
+how defaults are carried forward in cases like:
 
     x: { a: string | *"foo" } | *{ a: int | *4 }
     y: x.a & string
@@ -2964,7 +2941,7 @@ or the identifier following it.
 Note: this deviates from the Go spec where there is no such restriction.
 This restriction has the benefit of being to determine the identifiers
 for packages from within the file itself. But for CUE it is has another benefit:
-when using package hiearchies, one is more likely to want to include multiple
+when using package hierarchies, one is more likely to want to include multiple
 packages within the same directory structure. This mechanism allows
 disambiguation in these cases.
 -->

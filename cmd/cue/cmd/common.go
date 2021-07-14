@@ -19,8 +19,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/spf13/pflag"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 
@@ -170,7 +172,10 @@ func (b *buildPlan) instances() iterator {
 			i:    -1,
 		}
 	default:
-		i = &instanceIterator{a: []*cue.Instance{b.instance}, i: -1}
+		i = &instanceIterator{
+			a: []*cue.Instance{b.instance},
+			i: -1,
+		}
 		b.instance = nil
 	}
 	if len(b.expressions) > 0 {
@@ -215,7 +220,7 @@ func (i *instanceIterator) value() cue.Value {
 	return v
 }
 func (i *instanceIterator) instance() *cue.Instance {
-	if i.inst != nil {
+	if i.i >= len(i.a) {
 		return nil
 	}
 	return i.a[i.i]
@@ -349,15 +354,27 @@ func (i *expressionIter) value() cue.Value {
 	if len(i.expr) == 0 {
 		return i.iter.value()
 	}
-	// TODO: replace with FillPath.
-	return value.EvalExpr(i.iter.value(), i.expr[i.i])
+	v := i.iter.value()
+	path := ""
+	if inst := i.iter.instance(); inst != nil {
+		path = inst.ID()
+	}
+	return v.Context().BuildExpr(i.expr[i.i],
+		cue.Scope(v),
+		cue.InferBuiltins(true),
+		cue.ImportPath(path),
+	)
 }
 
 type config struct {
 	outMode filetypes.Mode
 
 	fileFilter     string
+	reFile         *regexp.Regexp
+	encoding       build.Encoding
 	interpretation build.Interpretation
+
+	overrideDefault bool
 
 	noMerge bool // do not merge individual data files.
 
@@ -378,10 +395,30 @@ func newBuildPlan(cmd *Command, args []string, cfg *config) (p *buildPlan, err e
 	if err := p.parseFlags(); err != nil {
 		return nil, err
 	}
+	re, err := regexp.Compile(p.cfg.fileFilter)
+	if err != nil {
+		return nil, err
+	}
+	cfg.reFile = re
 
-	cfg.loadCfg.Tags = flagInject.StringArray(cmd)
+	if err := setTags(cmd.Flags(), cfg.loadCfg); err != nil {
+		return nil, err
+	}
 
 	return p, nil
+}
+
+func (p *buildPlan) matchFile(file string) bool {
+	return p.cfg.reFile.MatchString(file)
+}
+
+func setTags(f *pflag.FlagSet, cfg *load.Config) error {
+	tags, _ := f.GetStringArray(string(flagInject))
+	cfg.Tags = tags
+	if b, _ := f.GetBool(string(flagInjectVars)); b {
+		cfg.TagVars = load.DefaultTagVars()
+	}
+	return nil
 }
 
 type decoderInfo struct {
@@ -407,9 +444,21 @@ func (d *decoderInfo) close() {
 // returned slices. It is up to the caller to Close any of the decoders that are
 // returned.
 func (p *buildPlan) getDecoders(b *build.Instance) (schemas, values []*decoderInfo, err error) {
-	for _, f := range b.OrphanedFiles {
+	files := b.OrphanedFiles
+	if p.cfg.overrideDefault {
+		files = append(files, b.UnknownFiles...)
+	}
+	for _, f := range files {
+		if !b.User && !p.matchFile(f.Filename) {
+			continue
+		}
+		if p.cfg.overrideDefault {
+			f.Encoding = p.cfg.encoding
+			f.Interpretation = p.cfg.interpretation
+		}
 		switch f.Encoding {
-		case build.Protobuf, build.YAML, build.JSON, build.JSONL, build.Text:
+		case build.Protobuf, build.YAML, build.JSON, build.JSONL,
+			build.Text, build.Binary:
 			if f.Interpretation == build.ProtobufJSON {
 				// Need a schema.
 				values = append(values, &decoderInfo{f, nil})
@@ -515,6 +564,11 @@ func parseArgs(cmd *Command, args []string, cfg *config) (p *buildPlan, err erro
 		}
 	}
 
+	if len(p.insts) == 0 && flagGlob.String(p.cmd) != "" {
+		return nil, errors.Newf(token.NoPos,
+			"use of -n/--name flag without a directory")
+	}
+
 	if b := p.orphanInstance; b != nil {
 		schemas, values, err := p.getDecoders(b)
 		for _, d := range append(schemas, values...) {
@@ -580,6 +634,9 @@ func parseArgs(cmd *Command, args []string, cfg *config) (p *buildPlan, err erro
 				}
 				p.encConfig.Schema = v
 			}
+		} else if p.schema != nil {
+			return nil, errors.Newf(token.NoPos,
+				"-d/--schema flag specified without a schema")
 		}
 
 		switch {
@@ -646,6 +703,7 @@ func (b *buildPlan) parseFlags() (err error) {
 		b.cfg.fileFilter = s
 	}
 	b.encConfig = &encoding.Config{
+		Force:     flagForce.Bool(b.cmd),
 		Mode:      b.cfg.outMode,
 		Stdin:     b.cmd.InOrStdin(),
 		Stdout:    b.cmd.OutOrStdout(),
@@ -698,12 +756,16 @@ func buildToolInstances(cmd *Command, binst []*build.Instance) ([]*cue.Instance,
 	return instances, nil
 }
 
-func buildTools(cmd *Command, tags, args []string) (*cue.Instance, error) {
+func buildTools(cmd *Command, args []string) (*cue.Instance, error) {
 
 	cfg := &load.Config{
-		Tags:  tags,
 		Tools: true,
 	}
+	f := cmd.cmd.Flags()
+	if err := setTags(f, cfg); err != nil {
+		return nil, err
+	}
+
 	binst := loadFromArgs(cmd, args, cfg)
 	if len(binst) == 0 {
 		return nil, nil
@@ -745,6 +807,9 @@ func buildTools(cmd *Command, tags, args []string) (*cue.Instance, error) {
 			}
 		}
 	}
+
+	// Set path equal to the package from which it is loading.
+	ti.ImportPath = binst[0].ImportPath
 
 	inst = inst.Build(ti)
 	return inst, inst.Err

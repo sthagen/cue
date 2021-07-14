@@ -21,17 +21,18 @@ import (
 
 // Common flags
 const (
-	flagAll       flagName = "all"
-	flagDryrun    flagName = "dryrun"
-	flagVerbose   flagName = "verbose"
-	flagAllErrors flagName = "all-errors"
-	flagTrace     flagName = "trace"
-	flagForce     flagName = "force"
-	flagIgnore    flagName = "ignore"
-	flagStrict    flagName = "strict"
-	flagSimplify  flagName = "simplify"
-	flagPackage   flagName = "package"
-	flagInject    flagName = "inject"
+	flagAll        flagName = "all"
+	flagDryrun     flagName = "dryrun"
+	flagVerbose    flagName = "verbose"
+	flagAllErrors  flagName = "all-errors"
+	flagTrace      flagName = "trace"
+	flagForce      flagName = "force"
+	flagIgnore     flagName = "ignore"
+	flagStrict     flagName = "strict"
+	flagSimplify   flagName = "simplify"
+	flagPackage    flagName = "package"
+	flagInject     flagName = "inject"
+	flagInjectVars flagName = "inject-vars"
 
 	flagExpression  flagName = "expression"
 	flagSchema      flagName = "schema"
@@ -44,6 +45,7 @@ const (
 	flagFiles       flagName = "files"
 	flagProtoPath   flagName = "proto_path"
 	flagProtoEnum   flagName = "proto_enum"
+	flagExt         flagName = "ext"
 	flagWithContext flagName = "with-context"
 	flagOut         flagName = "out"
 	flagOutFile     flagName = "outfile"
@@ -56,6 +58,7 @@ func addOutFlags(f *pflag.FlagSet, allowNonCUE bool) {
 	}
 	f.StringP(string(flagOutFile), "o", "",
 		`filename or - for stdout with optional file prefix (run 'cue filetypes' for more info)`)
+	f.BoolP(string(flagForce), "f", false, "force overwriting existing files")
 }
 
 func addGlobalFlags(f *pflag.FlagSet) {
@@ -81,8 +84,15 @@ func addOrphanFlags(f *pflag.FlagSet) {
 	f.Bool(string(flagWithContext), false, "import as object with contextual data")
 	f.StringArrayP(string(flagProtoPath), "I", nil, "paths in which to search for imports")
 	f.String(string(flagProtoEnum), "int", "mode for rendering enums (int|json)")
-	f.StringP(string(flagGlob), "n", "", "glob filter for file names")
+	f.StringP(string(flagGlob), "n", "", "glob filter for non-CUE file names in directories")
 	f.Bool(string(flagMerge), true, "merge non-CUE files")
+}
+
+func addInjectionFlags(f *pflag.FlagSet, auto bool) {
+	f.StringArrayP(string(flagInject), "t", nil,
+		"set the value of a tagged field")
+	f.BoolP(string(flagInjectVars), "T", auto,
+		"inject system variables in tags")
 }
 
 type flagName string

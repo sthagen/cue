@@ -20,6 +20,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"cuelang.org/go/cue"
+	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/format"
 	"cuelang.org/go/internal"
 	"cuelang.org/go/internal/encoding"
@@ -53,6 +54,7 @@ Examples:
 
 	addOutFlags(cmd.Flags(), true)
 	addOrphanFlags(cmd.Flags())
+	addInjectionFlags(cmd.Flags(), false)
 
 	cmd.Flags().StringArrayP(string(flagExpression), "e", nil, "evaluate this expression only")
 
@@ -70,9 +72,6 @@ Examples:
 
 	cmd.Flags().BoolP(string(flagAll), "a", false,
 		"show optional and hidden fields")
-
-	cmd.Flags().StringArrayP(string(flagInject), "t", nil,
-		"set the value of a tagged field")
 
 	// TODO: Option to include comments in output.
 	return cmd
@@ -119,17 +118,25 @@ func runEval(cmd *Command, args []string) error {
 		}
 		v := iter.value()
 
+		errHeader := func() {
+			if id != "" {
+				fmt.Fprintf(cmd.OutOrStderr(), "// %s\n", id)
+			}
+		}
+		if b.outFile.Encoding != build.CUE {
+			err := e.Encode(v)
+			if err != nil {
+				errHeader()
+				exitOnErr(cmd, err, false)
+			}
+			continue
+		}
+
 		if flagConcrete.Bool(cmd) {
 			syn = append(syn, cue.Concrete(true))
 		}
 		if flagHidden.Bool(cmd) || flagAll.Bool(cmd) {
 			syn = append(syn, cue.Hidden(true))
-		}
-
-		errHeader := func() {
-			if id != "" {
-				fmt.Fprintf(cmd.OutOrStderr(), "// %s\n", id)
-			}
 		}
 
 		if len(b.expressions) > 1 {

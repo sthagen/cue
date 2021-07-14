@@ -15,11 +15,7 @@
 package cue
 
 import (
-	"cuelang.org/go/cue/ast"
-	"cuelang.org/go/cue/ast/astutil"
-	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
-	"cuelang.org/go/internal/core/compile"
 )
 
 // This file contains query-related code.
@@ -27,7 +23,7 @@ import (
 // getScopePrefix finds the Vertex that exists in v for the longest prefix of p.
 //
 // It is used to make the parent scopes visible when resolving expressions.
-func getScopePrefix(v Value, p Path) *adt.Vertex {
+func getScopePrefix(v Value, p Path) Value {
 	for _, sel := range p.Selectors() {
 		w := v.LookupPath(MakePath(sel))
 		if !w.Exists() {
@@ -35,22 +31,7 @@ func getScopePrefix(v Value, p Path) *adt.Vertex {
 		}
 		v = w
 	}
-	return v.v
-}
-
-func errFn(pos token.Pos, msg string, args ...interface{}) {}
-
-// resolveExpr binds unresolved expressions to values in the expression or v.
-func resolveExpr(ctx *adt.OpContext, v *adt.Vertex, x ast.Expr) adt.Value {
-	cfg := &compile.Config{Scope: v}
-
-	astutil.ResolveExpr(x, errFn)
-
-	c, err := compile.Expr(cfg, ctx, pkgID(), x)
-	if err != nil {
-		return &adt.Bottom{Err: err}
-	}
-	return adt.Resolve(ctx, c)
+	return v
 }
 
 // LookupPath reports the value for path p relative to v.
@@ -59,6 +40,7 @@ func (v Value) LookupPath(p Path) Value {
 		return Value{}
 	}
 	n := v.v
+	parent := v.parent_
 	ctx := v.ctx()
 
 outer:
@@ -66,18 +48,20 @@ outer:
 		f := sel.sel.feature(v.idx)
 		for _, a := range n.Arcs {
 			if a.Label == f {
+				parent = linkParent(parent, n, a)
 				n = a
 				continue outer
 			}
 		}
 		if sel.sel.optional() {
 			x := &adt.Vertex{
-				Parent: v.v,
+				Parent: n,
 				Label:  sel.sel.feature(ctx),
 			}
 			n.MatchAndInsert(ctx, x)
 			if len(x.Conjuncts) > 0 {
 				x.Finalize(ctx)
+				parent = linkParent(parent, n, x)
 				n = x
 				continue
 			}
@@ -90,8 +74,8 @@ outer:
 			// TODO: better message.
 			x = mkErr(v.idx, n, adt.NotExistError, "field %q not found", sel.sel)
 		}
-		v := makeValue(v.idx, n)
+		v := makeValue(v.idx, n, parent)
 		return newErrValue(v, x)
 	}
-	return makeValue(v.idx, n)
+	return makeValue(v.idx, n, parent)
 }

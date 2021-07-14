@@ -16,9 +16,12 @@ package cue
 
 import (
 	"cuelang.org/go/cue/ast"
+	"cuelang.org/go/cue/ast/astutil"
 	"cuelang.org/go/cue/build"
 	"cuelang.org/go/cue/errors"
+	"cuelang.org/go/cue/token"
 	"cuelang.org/go/internal/core/adt"
+	"cuelang.org/go/internal/core/compile"
 	"cuelang.org/go/internal/core/convert"
 	"cuelang.org/go/internal/core/debug"
 	"cuelang.org/go/internal/core/eval"
@@ -69,13 +72,37 @@ func Scope(scope Value) BuildOption {
 		if o.Scope != nil {
 			panic("more than one scope is given")
 		}
-		o.Scope = scope.v
+		o.Scope = valueScope(scope)
 	}
 }
 
 // Filename assigns a filename to parsed content.
 func Filename(filename string) BuildOption {
 	return func(o *runtime.Config) { o.Filename = filename }
+}
+
+// ImportPath defines the import path to use for building CUE. The import path
+// influences the scope in which identifiers occurring in the input CUE are
+// defined. Passing the empty string is equal to not specifying this option.
+//
+// This option is typically not necessary when building using a build.Instance,
+// but takes precedence otherwise.
+func ImportPath(path string) BuildOption {
+	return func(o *runtime.Config) { o.ImportPath = path }
+}
+
+// InferBuiltins allows unresolved references to bind to builtin packages with a
+// unique package name.
+//
+// This option is intended for evaluating expressions in a context where import
+// statements cannot be used. It is not recommended to use this for evaluating
+// CUE files.
+func InferBuiltins(elide bool) BuildOption {
+	return func(o *runtime.Config) {
+		o.Imports = func(x *ast.Ident) (pkgPath string) {
+			return o.Runtime.BuiltinPackagePath(x.Name)
+		}
+	}
 }
 
 func (c *Context) parseOptions(options []BuildOption) (cfg runtime.Config) {
@@ -143,13 +170,46 @@ func (c *Context) compile(v *adt.Vertex, p *build.Instance) Value {
 // The returned Value will represent an error, accessible through Err, if any
 // error occurred.
 func (c *Context) BuildExpr(x ast.Expr, options ...BuildOption) Value {
+	r := c.runtime()
 	cfg := c.parseOptions(options)
-	v, p, err := c.runtime().CompileExpr(&cfg, x)
-	if err != nil {
-		return c.makeError(p.Err)
+
+	ctx := c.ctx()
+
+	// TODO: move to runtime?: it probably does not make sense to treat BuildExpr
+	// and the expression resulting from CompileString differently.
+	astutil.ResolveExpr(x, errFn)
+
+	pkgPath := cfg.ImportPath
+	if pkgPath == "" {
+		pkgPath = anonymousPkg
 	}
+
+	conjunct, err := compile.Expr(&cfg.Config, r, pkgPath, x)
+	if err != nil {
+		return c.makeError(err)
+	}
+	v := adt.Resolve(ctx, conjunct)
+
 	return c.make(v)
 }
+
+func errFn(pos token.Pos, msg string, args ...interface{}) {}
+
+// resolveExpr binds unresolved expressions to values in the expression or v.
+func resolveExpr(ctx *adt.OpContext, v Value, x ast.Expr) adt.Value {
+	cfg := &compile.Config{Scope: valueScope(v)}
+
+	astutil.ResolveExpr(x, errFn)
+
+	c, err := compile.Expr(cfg, ctx, anonymousPkg, x)
+	if err != nil {
+		return &adt.Bottom{Err: err}
+	}
+	return adt.Resolve(ctx, c)
+}
+
+// anonymousPkg reports a package path that can never resolve to a valid package.
+const anonymousPkg = "_"
 
 // CompileString parses and build a Value from the given source string.
 //
@@ -211,6 +271,86 @@ func NilIsAny(isAny bool) EncodeOption {
 //
 // The returned Value will represent an error, accessible through Err, if any
 // error occurred.
+//
+// Encode traverses the value v recursively. If an encountered value implements
+// the json.Marshaler interface and is not a nil pointer, Encode calls its
+// MarshalJSON method to produce JSON and convert that to CUE instead. If no
+// MarshalJSON method is present but the value implements encoding.TextMarshaler
+// instead, Encode calls its MarshalText method and encodes the result as a
+// string.
+//
+// Otherwise, Encode uses the following type-dependent default encodings:
+//
+// Boolean values encode as CUE booleans.
+//
+// Floating point, integer, and *big.Int and *big.Float values encode as CUE
+// numbers.
+//
+// String values encode as CUE strings coerced to valid UTF-8, replacing
+// sequences of invalid bytes with the Unicode replacement rune as per Unicode's
+// and W3C's recommendation.
+//
+// Array and slice values encode as CUE lists, except that []byte encodes as a
+// bytes value, and a nil slice encodes as the null.
+//
+// Struct values encode as CUE structs. Each exported struct field becomes a
+// member of the object, using the field name as the object key, unless the
+// field is omitted for one of the reasons given below.
+//
+// The encoding of each struct field can be customized by the format string
+// stored under the "json" key in the struct field's tag. The format string
+// gives the name of the field, possibly followed by a comma-separated list of
+// options. The name may be empty in order to specify options without overriding
+// the default field name.
+//
+// The "omitempty" option specifies that the field should be omitted from the
+// encoding if the field has an empty value, defined as false, 0, a nil pointer,
+// a nil interface value, and any empty array, slice, map, or string.
+//
+// See the documentation for Go's json.Marshal for more details on the field
+// tags and their meaning.
+//
+// Anonymous struct fields are usually encoded as if their inner exported
+// fields were fields in the outer struct, subject to the usual Go visibility
+// rules amended as described in the next paragraph. An anonymous struct field
+// with a name given in its JSON tag is treated as having that name, rather than
+// being anonymous. An anonymous struct field of interface type is treated the
+// same as having that type as its name, rather than being anonymous.
+//
+// The Go visibility rules for struct fields are amended for when deciding which
+// field to encode or decode. If there are multiple fields at the same level,
+// and that level is the least nested (and would therefore be the nesting level
+// selected by the usual Go rules), the following extra rules apply:
+//
+// 1) Of those fields, if any are JSON-tagged, only tagged fields are
+// considered, even if there are multiple untagged fields that would otherwise
+// conflict.
+//
+// 2) If there is exactly one field (tagged or not according to the first rule),
+// that is selected.
+//
+// 3) Otherwise there are multiple fields, and all are ignored; no error occurs.
+//
+// Map values encode as CUE structs. The map's key type must either be a string,
+// an integer type, or implement encoding.TextMarshaler. The map keys are sorted
+// and used as CUE struct field names by applying the following rules, subject
+// to the UTF-8 coercion described for string values above:
+//
+//  - keys of any string type are used directly
+//  - encoding.TextMarshalers are marshaled
+//  - integer keys are converted to strings
+//
+// Pointer values encode as the value pointed to. A nil pointer encodes as the
+// null CUE value.
+//
+// Interface values encode as the value contained in the interface. A nil
+// interface value encodes as the null CUE value. The NilIsAny EncodingOption
+// can be used to interpret nil as any (_) instead.
+//
+// Channel, complex, and function values cannot be encoded in CUE. Attempting to
+// encode such a value results in the returned value being an error, accessible
+// through the Err method.
+//
 func (c *Context) Encode(x interface{}, option ...EncodeOption) Value {
 	switch v := x.(type) {
 	case adt.Value:
@@ -249,13 +389,23 @@ func (c *Context) EncodeType(x interface{}, option ...EncodeOption) Value {
 	return c.make(n)
 }
 
+// NewList creates a Value that is a list of the given values.
+//
+// All Values must be created by c.
+func (c *Context) NewList(v ...Value) Value {
+	a := make([]adt.Value, len(v))
+	for i, x := range v {
+		if x.idx != (*runtime.Runtime)(c) {
+			panic("values must be from same Context")
+		}
+		a[i] = x.v
+	}
+	return c.make(c.ctx().NewList(a...))
+}
+
 // TODO:
 
 // func (c *Context) NewExpr(op Op, v ...Value) Value {
-// 	return Value{}
-// }
-
-// func (c *Context) NewList(v ...Value) Value {
 // 	return Value{}
 // }
 

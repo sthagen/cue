@@ -350,9 +350,6 @@ func applyCursor(v applyVisitor, c Cursor) {
 	case *ast.BottomLit, *ast.BadExpr, *ast.Ident, *ast.BasicLit:
 		// nothing to do
 
-	case *ast.TemplateLabel:
-		apply(v, c, &n.Ident)
-
 	case *ast.Interpolation:
 		applyExprList(v, c, &n, n.Elts)
 
@@ -434,13 +431,6 @@ func applyCursor(v applyVisitor, c Cursor) {
 
 	case *ast.Package:
 		apply(v, c, &n.Name)
-
-	case *ast.ListComprehension:
-		apply(v, c, &n.Expr)
-		clauses := n.Clauses
-		for i := range clauses {
-			apply(v, c, &clauses[i])
-		}
 
 	case *ast.ForClause:
 		if n.Key != nil {
